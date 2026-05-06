@@ -16,20 +16,13 @@ def _redact_database_url(url: str) -> str:
         return "<could not parse DATABASE_URL; check format>"
 
 
-def _is_sqlite_url(url: str) -> bool:
-    try:
-        driver = make_url(url).drivername.split("+", 1)[0]
-        return driver == "sqlite"
-    except Exception:
-        return url.strip().lower().startswith("sqlite")
-
-
 def _create_engine_with_logging():
     url = settings.database_url
-    # SQLite (any path): FastAPI + SQLAlchemy use multiple threads; this avoids thread errors.
-    connect_args = {"check_same_thread": False} if _is_sqlite_url(url) else {}
+    connect_args = (
+        {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+    )
     engine_kwargs: dict = {"connect_args": connect_args}
-    if not _is_sqlite_url(url):
+    if not settings.database_url.startswith("sqlite"):
         engine_kwargs["pool_pre_ping"] = True
 
     safe_url = _redact_database_url(url)
@@ -37,7 +30,8 @@ def _create_engine_with_logging():
         return create_engine(url, **engine_kwargs)
     except ModuleNotFoundError as exc:
         _log.exception(
-            "Database engine: missing Python driver (%s). URL=%s.",
+            "Database engine: missing Python driver (%s). URL=%s. "
+            "For PostgreSQL install psycopg2-binary (postgresql+psycopg2 URLs).",
             exc,
             safe_url,
         )
@@ -62,7 +56,7 @@ def _sqlite_table_columns(conn, table: str) -> set[str]:
 
 def ensure_sqlite_schema() -> None:
     """SQLite: add columns introduced after first deploy (create_all does not ALTER)."""
-    if not _is_sqlite_url(settings.database_url):
+    if not settings.database_url.startswith("sqlite"):
         return
     with engine.begin() as conn:
         try:
