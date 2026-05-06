@@ -62,6 +62,20 @@ class Settings(BaseSettings):
             return 31
         return v
 
+    @field_validator("frontend_url", mode="before")
+    @classmethod
+    def frontend_url_absolute(cls, v: object) -> str:
+        """Must include a scheme. Host-only values break OAuth redirect (browser treats them as relative paths)."""
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return "http://localhost:5173"
+        s = str(v).strip().rstrip("/")
+        if "://" in s:
+            return s
+        low = s.lower()
+        if low.startswith("localhost") or low.startswith("127.0.0.1"):
+            return f"http://{s}"
+        return f"https://{s}"
+
     @field_validator("gemini_model", mode="before")
     @classmethod
     def gemini_model_non_empty(cls, v: object) -> str:
