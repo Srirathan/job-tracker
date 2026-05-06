@@ -22,7 +22,8 @@ function resolveApiBase(): string {
   if (import.meta.env.DEV) {
     return ''
   }
-  return 'http://127.0.0.1:8000'
+  // Production: do not default to localhost — the browser would call the user’s machine, not your API.
+  return ''
 }
 
 export const API_BASE = resolveApiBase()
@@ -60,7 +61,15 @@ async function parseErrorMessage(res: Response): Promise<string> {
   return res.statusText || 'Request failed'
 }
 
+const missingProdApiUrlMessage =
+  'This deployment is missing VITE_API_URL. In Vercel: Project → Settings → Environment Variables → add ' +
+  'VITE_API_URL = https://YOUR-BACKEND.onrender.com (your FastAPI URL, no trailing slash), then redeploy. ' +
+  'Do not use your Vercel frontend URL here.'
+
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  if (!import.meta.env.DEV && API_BASE === '') {
+    throw new Error(missingProdApiUrlMessage)
+  }
   const url = `${API_BASE}${path}`
   try {
     return await fetch(url, init)
