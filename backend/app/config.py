@@ -1,6 +1,7 @@
+import os
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load only backend/.env (exact filename ".env") next to this package.
@@ -8,8 +9,16 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE_PATH = _BACKEND_DIR / ".env"
 
 
+def _default_database_url() -> str:
+    """When DATABASE_URL is unset: local file ./app.db; on Render, persistent disk at /data."""
+    if os.environ.get("RENDER", "").lower() in ("true", "1", "yes"):
+        # Four slashes: sqlite URL + absolute path /data/app.db
+        return "sqlite:////data/app.db"
+    return "sqlite:///./app.db"
+
+
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///./app.db"
+    database_url: str = Field(default_factory=_default_database_url)
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
@@ -37,13 +46,9 @@ class Settings(BaseSettings):
     @field_validator("database_url", mode="before")
     @classmethod
     def normalize_database_url(cls, v: object) -> str:
-        if v is None or (isinstance(v, str) and not v.strip()):
-            return "sqlite:///./app.db"
-        s = str(v).strip()
-        # Heroku / some hosts use postgres://; SQLAlchemy expects postgresql://
-        if s.startswith("postgres://"):
-            s = "postgresql://" + s[len("postgres://") :]
-        return s
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return _default_database_url()
+        return str(v).strip()
 
     @field_validator("jwt_secret_key", mode="before")
     @classmethod

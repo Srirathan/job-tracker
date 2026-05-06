@@ -26,6 +26,7 @@ def _is_sqlite_url(url: str) -> bool:
 
 def _create_engine_with_logging():
     url = settings.database_url
+    # SQLite (any path): FastAPI + SQLAlchemy use multiple threads; this avoids thread errors.
     connect_args = {"check_same_thread": False} if _is_sqlite_url(url) else {}
     engine_kwargs: dict = {"connect_args": connect_args}
     if not _is_sqlite_url(url):
@@ -36,17 +37,14 @@ def _create_engine_with_logging():
         return create_engine(url, **engine_kwargs)
     except ModuleNotFoundError as exc:
         _log.exception(
-            "Database engine: missing Python driver (%s). URL=%s. "
-            "For PostgreSQL add psycopg2-binary to requirements.txt; "
-            "for other backends install the matching SQLAlchemy DBAPI package.",
+            "Database engine: missing Python driver (%s). URL=%s.",
             exc,
             safe_url,
         )
         raise
     except Exception:
         _log.exception(
-            "Database engine: create_engine failed. URL=%s. "
-            "Verify DATABASE_URL scheme (e.g. postgresql+psycopg2://...) and that the URL is valid.",
+            "Database engine: create_engine failed. URL=%s. Check path, permissions, and URL format.",
             safe_url,
         )
         raise
