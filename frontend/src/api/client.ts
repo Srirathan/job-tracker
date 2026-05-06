@@ -12,12 +12,24 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY)
 }
 
+/** Keep only scheme + host (+ port). Stops bad env like `.../api/gmail/oauth/callback` from breaking every path. */
+function normalizeApiOrigin(input: string): string {
+  const s = input.trim().replace(/\/$/, '')
+  if (!s) return ''
+  try {
+    const url = new URL(s.includes('://') ? s : `https://${s}`)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return s
+  }
+}
+
 /** API origin. In dev with no env var, use '' so requests stay same-origin and Vite proxies `/api` to FastAPI. */
 function resolveApiBase(): string {
   const raw = import.meta.env.VITE_API_URL as string | undefined
   const trimmed = typeof raw === 'string' ? raw.trim() : ''
   if (trimmed.length > 0) {
-    return trimmed.replace(/\/$/, '')
+    return normalizeApiOrigin(trimmed)
   }
   if (import.meta.env.DEV) {
     return ''
@@ -63,7 +75,7 @@ async function parseErrorMessage(res: Response): Promise<string> {
 
 const missingProdApiUrlMessage =
   'This deployment is missing VITE_API_URL. In Vercel: Project → Settings → Environment Variables → add ' +
-  'VITE_API_URL = https://YOUR-BACKEND.onrender.com (your FastAPI URL, no trailing slash), then redeploy. ' +
+  'VITE_API_URL = https://YOUR-BACKEND.onrender.com (origin only: no /api path, no trailing slash), then redeploy. ' +
   'Do not use your Vercel frontend URL here.'
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
