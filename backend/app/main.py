@@ -25,10 +25,18 @@ from app.routes.settings import router as settings_router
 from app.routes.sync import router as sync_router
 from app.services.gmail_client import gmail_oauth_configured
 
-Base.metadata.create_all(bind=engine)
-ensure_sqlite_schema()
-
 _log = logging.getLogger("uvicorn.error")
+
+try:
+    Base.metadata.create_all(bind=engine)
+    ensure_sqlite_schema()
+except Exception:
+    _log.exception(
+        "Startup failed while connecting to the database or creating tables. "
+        "Typical causes: wrong DATABASE_URL, DB not reachable from Render, TLS/firewall, "
+        "or invalid credentials. See traceback below."
+    )
+    raise
 
 
 @asynccontextmanager

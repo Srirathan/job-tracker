@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load only backend/.env (exact filename ".env") next to this package.
@@ -32,6 +33,45 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v: object) -> str:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return "sqlite:///./app.db"
+        s = str(v).strip()
+        # Heroku / some hosts use postgres://; SQLAlchemy expects postgresql://
+        if s.startswith("postgres://"):
+            s = "postgresql://" + s[len("postgres://") :]
+        return s
+
+    @field_validator("jwt_secret_key", mode="before")
+    @classmethod
+    def jwt_secret_non_empty(cls, v: object) -> str:
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return "change-me-in-production"
+        return str(v)
+
+    @field_validator("access_token_expire_minutes", mode="before")
+    @classmethod
+    def token_minutes_coerce(cls, v: object) -> object:
+        if v is None or v == "":
+            return 60
+        return v
+
+    @field_validator("gmail_sync_newer_than_days", mode="before")
+    @classmethod
+    def lookback_days_coerce(cls, v: object) -> object:
+        if v is None or v == "":
+            return 31
+        return v
+
+    @field_validator("gemini_model", mode="before")
+    @classmethod
+    def gemini_model_non_empty(cls, v: object) -> str:
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return "gemini-2.5-flash"
+        return str(v).strip()
 
 
 settings = Settings()
