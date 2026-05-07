@@ -21,6 +21,8 @@ _log = logging.getLogger(__name__)
 TAB = "Applications"
 RANGE_HEADERS = f"{TAB}!A10:D10"
 RANGE_DATA = f"{TAB}!A11:D10000"
+# Rebuild should wipe everything below the stats rows (keeps A2:F3).
+RANGE_REBUILD_CLEAR = f"{TAB}!A4:F10000"
 # Memory: only scan first 200 data rows when matching company+role (upsert / delete).
 RANGE_MATCH_SLICE = f"{TAB}!A11:D200"
 RANGE_ROW_COUNT_SLICE = f"{TAB}!A11:A500"
@@ -118,38 +120,54 @@ def _stats_format_requests(tab_id: int) -> list[dict]:
     ]
 
 
-def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
-    """Seed horizontal stats (rows 2–3) and column headers (row 10) once when A2 is empty."""
-    if _stats_already_seeded(service, spreadsheet_id):
-        return
+def _stats_headers_and_formulas() -> tuple[list[str], list[str]]:
+    headers = [
+        "Total Applied",
+        "Interviews",
+        "Online Assessment",
+        "Rejected",
+        "Offers",
+        "Response Rate",
+    ]
+    # Lock ranges with INDIRECT so references never drift.
+    # Also exclude header-like rows by requiring col A not blank and not equal "Date".
+    formulas = [
+        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Applied*")'
+        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Interview*")'
+        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*OA*")'
+        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Rejected*")'
+        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Offer*")',
+        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Interview*")',
+        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*OA*")',
+        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Rejected*")',
+        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Offer*")',
+        '=IF(A3=0,"0%",TEXT((B3+C3+D3+E3)/A3,"0%"))',
+    ]
+    return headers, formulas
 
+
+def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
+    """Ensure stats headers/formulas and row-10 headers are present and valid."""
     tab_id = _tab_sheet_id(service, spreadsheet_id, TAB)
     if tab_id is None:
         return
+    was_seeded = _stats_already_seeded(service, spreadsheet_id)
 
-    stats_values = [
-        [
-            "Total Applied",
-            "Interviews",
-            "Online Assessment",
-            "Rejected",
-            "Offers",
-            "Response Rate",
-        ],
-        [
-            '=(COUNTIF(D11:D1000,"Applied")+COUNTIF(D11:D1000,"Interview")+COUNTIF(D11:D1000,"OA")+COUNTIF(D11:D1000,"Rejected")+COUNTIF(D11:D1000,"Offer"))',
-            '=COUNTIF(D11:D1000,"Interview")',
-            '=COUNTIF(D11:D1000,"OA")',
-            '=COUNTIF(D11:D1000,"Rejected")',
-            '=COUNTIF(D11:D1000,"Offer")',
-            '=IF(A3=0,"0%",TEXT((B3+C3+D3+E3)/A3,"0%"))',
-        ],
-    ]
+    # Rewrite formulas every run so accidental manual edits cannot break the stats block.
+    stats_headers, stats_formulas = _stats_headers_and_formulas()
+
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range=STATS_VALUE_RANGE,
+        range=f"{TAB}!A2:F2",
         valueInputOption="USER_ENTERED",
-        body={"values": stats_values},
+        body={"values": [stats_headers]},
+    ).execute()
+
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"{TAB}!A3:F3",
+        valueInputOption="USER_ENTERED",
+        body={"values": [stats_formulas]},
     ).execute()
 
     headers_body = {"values": [["Date", "Company", "Role", "Status"]]}
@@ -160,10 +178,11 @@ def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
         body=headers_body,
     ).execute()
 
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": _stats_format_requests(tab_id)},
-    ).execute()
+    if not was_seeded:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": _stats_format_requests(tab_id)},
+        ).execute()
 
 
 def _read_match_rows(service, spreadsheet_id: str) -> list[list[str]]:
@@ -408,7 +427,9 @@ def rebuild_sheet(db: Session, user: User) -> int:
     service = _sheets_service(creds)
 
     try:
-        service.spreadsheets().values().clear(spreadsheetId=sheet_id, range=RANGE_DATA).execute()
+        # Wipe everything below the stats block so stray headers/rows above A11
+        # don't cause stats to "miss" items.
+        service.spreadsheets().values().clear(spreadsheetId=sheet_id, range=RANGE_REBUILD_CLEAR).execute()
     except HttpError as exc:
         _log.warning("Sheets clear failed: %s", exc)
         raise
@@ -440,6 +461,15 @@ def rebuild_sheet(db: Session, user: User) -> int:
     for i, a in enumerate(apps):
         row_1based = 11 + i
         _apply_status_cell_color(service, sheet_id, tab_id, row_1based, a.status.value)
+
+    # Force stats formula refresh after bulk write to avoid stale/overwritten cells.
+    _, stats_formulas = _stats_headers_and_formulas()
+    service.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"{TAB}!A3:F3",
+        valueInputOption="USER_ENTERED",
+        body={"values": [stats_formulas]},
+    ).execute()
 
     sort_sheet_by_date(user)
     return len(values)
