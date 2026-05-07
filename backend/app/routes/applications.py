@@ -101,7 +101,7 @@ def sheet_update_from_apps_script(
             detail="Sheet sync is not configured",
         )
 
-    hdr = x_sheet_token or ""
+    hdr = (x_sheet_token or "").strip()
     if not _timing_safe_match(expected, hdr):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid sheet sync token")
 
@@ -120,6 +120,14 @@ def sheet_update_from_apps_script(
 
     new_status = _parse_sheet_status(status_trim)
     sid_filter = (body.spreadsheet_id or "").strip() or None
+
+    _log.info(
+        "Sheet webhook: row=%s company=%s role=%s status=%s",
+        body.row_number,
+        company_s[:80],
+        role_s[:80],
+        new_status.value,
+    )
 
     matches: list[Application] = []
     for app in db.scalars(select(Application).options(joinedload(Application.user))).all():
