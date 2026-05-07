@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
@@ -33,23 +33,33 @@ def _timing_safe_match(expected: str, provided: str) -> bool:
 def resolve_sheet_owner(db: Session, spreadsheet_id: str | None) -> User | None:
     """Map a spreadsheet id to the Job Tracker user who owns that sheet (Settings / env)."""
     sid = (spreadsheet_id or "").strip()
-    if sid:
-        u = db.scalar(select(User).where(User.google_sheet_id == sid))
-        if u is not None:
-            return u
-        env_id = (settings.google_sheet_id or "").strip()
-        if env_id and env_id == sid:
-            blanks = list(
-                db.scalars(
-                    select(User).where(or_(User.google_sheet_id.is_(None), User.google_sheet_id == ""))
-                ).all()
-            )
-            if len(blanks) == 1:
-                return blanks[0]
-        return None
+    users = list(db.scalars(select(User)).all())
 
-    everyone = list(db.scalars(select(User)).all())
-    return everyone[0] if len(everyone) == 1 else None
+    if not sid:
+        return users[0] if len(users) == 1 else None
+
+    by_effective: list[User] = []
+    for u in users:
+        eff = sheets_sync.effective_sheet_id(u)
+        if eff and eff == sid:
+            by_effective.append(u)
+    if len(by_effective) == 1:
+        return by_effective[0]
+
+    u = next((x for x in users if (x.google_sheet_id or "").strip() == sid), None)
+    if u is not None:
+        return u
+
+    env_id = (settings.google_sheet_id or "").strip()
+    if env_id == sid and len(users) == 1:
+        return users[0]
+
+    if env_id == sid:
+        blanks = [x for x in users if not (x.google_sheet_id or "").strip()]
+        if len(blanks) == 1:
+            return blanks[0]
+
+    return None
 
 
 def _parse_sheet_status(raw: str) -> ApplicationStatus:
@@ -124,11 +134,18 @@ def sheet_update_from_apps_script(
     if not matches:
         owner = resolve_sheet_owner(db, sid_filter)
         if owner is None:
+            n_accounts = db.scalar(select(func.count()).select_from(User)) or 0
+            _log.warning(
+                "Sheet webhook: no owner for spreadsheet (create path); id_suffix=%s users=%s",
+                sid_filter[-8:] if sid_filter and len(sid_filter) >= 8 else (sid_filter or ""),
+                n_accounts,
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
-                    "No application matches this row and no owner could be resolved for "
-                    "this spreadsheet — link it in Settings (Google Sheet ID) or send spreadsheet_id."
+                    "No application matches this row and no account owns this spreadsheet. "
+                    "In the web app Settings, set Google Sheet ID to the spreadsheet id from the URL "
+                    "(same file as this script). If you use GOOGLE_SHEET_ID on the server, it must match too."
                 ),
             )
 
