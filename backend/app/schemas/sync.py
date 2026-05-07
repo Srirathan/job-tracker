@@ -7,7 +7,7 @@ class SyncSummaryOut(BaseModel):
     updated: int
     skipped: int
     skipped_already_seen: int = 0
-    skipped_gemini_failed: int = 0
+    skipped_groq_failed: int = 0
     skipped_low_confidence: int = 0
     skipped_missing_company: int = 0
     skipped_unknown_status: int = 0

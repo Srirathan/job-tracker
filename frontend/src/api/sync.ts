@@ -6,7 +6,7 @@ export type SyncSummary = {
   updated: number
   skipped: number
   skipped_already_seen: number
-  skipped_gemini_failed: number
+  skipped_groq_failed: number
   skipped_low_confidence: number
   skipped_missing_company: number
   skipped_unknown_status: number

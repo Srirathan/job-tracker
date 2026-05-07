@@ -47,7 +47,7 @@ def sync_gmail(
         updated=summary.updated,
         skipped=summary.skipped,
         skipped_already_seen=summary.skipped_already_seen,
-        skipped_gemini_failed=summary.skipped_gemini_failed,
+        skipped_groq_failed=summary.skipped_groq_failed,
         skipped_low_confidence=summary.skipped_low_confidence,
         skipped_missing_company=summary.skipped_missing_company,
         skipped_unknown_status=summary.skipped_unknown_status,
