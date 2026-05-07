@@ -7,14 +7,23 @@ from app.models.application import ApplicationStatus
 
 
 class SheetWebhookUpdateIn(BaseModel):
-    """Body from Google Apps Script on edits to Company / Role / Status (sheet row ≥ 11)."""
+    """Body from Google Apps Script on edits in the Applications data block (sheet row ≥ 11)."""
 
     row_number: int = Field(ge=1)
     company: str
     role: str
     status: str
-    #: Optional ownership filter — send SpreadsheetApp.getActiveSpreadsheet().getId() from the Script.
+    #: Optional column A date (YYYY-MM-DD). If omitted on create, server uses UTC “today”.
+    date: Optional[datetime] = None
+    #: Ownership filter — send SpreadsheetApp.getActiveSpreadsheet().getId() from the Script.
     spreadsheet_id: Optional[str] = None
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def coerce_sheet_date(cls, v: object) -> object:
+        if v is None or v == "":
+            return None
+        return _coerce_app_date(v)
 
 
 class ApplicationOut(BaseModel):

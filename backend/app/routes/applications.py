@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
@@ -27,6 +28,28 @@ def _timing_safe_match(expected: str, provided: str) -> bool:
     if not e or not p or len(e) != len(p):
         return False
     return secrets.compare_digest(e, p)
+
+
+def resolve_sheet_owner(db: Session, spreadsheet_id: str | None) -> User | None:
+    """Map a spreadsheet id to the Job Tracker user who owns that sheet (Settings / env)."""
+    sid = (spreadsheet_id or "").strip()
+    if sid:
+        u = db.scalar(select(User).where(User.google_sheet_id == sid))
+        if u is not None:
+            return u
+        env_id = (settings.google_sheet_id or "").strip()
+        if env_id and env_id == sid:
+            blanks = list(
+                db.scalars(
+                    select(User).where(or_(User.google_sheet_id.is_(None), User.google_sheet_id == ""))
+                ).all()
+            )
+            if len(blanks) == 1:
+                return blanks[0]
+        return None
+
+    everyone = list(db.scalars(select(User)).all())
+    return everyone[0] if len(everyone) == 1 else None
 
 
 def _parse_sheet_status(raw: str) -> ApplicationStatus:
@@ -99,7 +122,38 @@ def sheet_update_from_apps_script(
         matches.append(app)
 
     if not matches:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+        owner = resolve_sheet_owner(db, sid_filter)
+        if owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "No application matches this row and no owner could be resolved for "
+                    "this spreadsheet — link it in Settings (Google Sheet ID) or send spreadsheet_id."
+                ),
+            )
+
+        email_date = body.date if body.date is not None else datetime.now(timezone.utc)
+
+        created = Application(
+            user_id=owner.id,
+            gmail_message_id=None,
+            email_date=email_date,
+            company=company_s,
+            role=role_s,
+            status=new_status,
+        )
+        db.add(created)
+        db.commit()
+        db.refresh(created)
+        upsert_application_row(owner, created)
+        _log.info(
+            "Sheet create: %s - %s - %s (row %s)",
+            company_s,
+            role_s,
+            new_status.value,
+            body.row_number,
+        )
+        return {"ok": True}
 
     owners = {a.user_id for a in matches}
     if len(owners) > 1:
@@ -115,7 +169,13 @@ def sheet_update_from_apps_script(
 
     disp_company = chosen.company if chosen.company else company_s
     disp_role = chosen.role if chosen.role else role_s
-    _log.info("Sheet update: %s - %s - %s", disp_company, disp_role, new_status.value)
+    _log.info(
+        "Sheet update: %s - %s - %s (row %s)",
+        disp_company,
+        disp_role,
+        new_status.value,
+        body.row_number,
+    )
     return {"ok": True}
 
 
