@@ -96,9 +96,9 @@ export function ApplicationsPage() {
               {lastSync.skipped_already_seen > 0 ? (
                 <li>Already processed before: {lastSync.skipped_already_seen}</li>
               ) : null}
-              {lastSync.skipped_gemini_failed > 0 ? (
+              {lastSync.skipped_groq_failed > 0 ? (
                 <li>
-                  Gemini failed (missing key, API error, or blocked response): {lastSync.skipped_gemini_failed}
+                  Groq extraction failed (API error or bad response): {lastSync.skipped_groq_failed}
                 </li>
               ) : null}
               {lastSync.skipped_low_confidence > 0 ? (

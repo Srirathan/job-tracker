@@ -24,9 +24,8 @@ class Settings(BaseSettings):
 
     gmail_sync_newer_than_days: int = 31
 
-    gemini_api_key: str = ""
-    # `gemini-1.5-flash` is no longer available on the current API; override via GEMINI_MODEL if needed.
-    gemini_model: str = "gemini-2.5-flash"
+    groq_api_key: str = ""
+    groq_delay_seconds: int = 2
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE_PATH),
@@ -76,12 +75,12 @@ class Settings(BaseSettings):
             return f"http://{s}"
         return f"https://{s}"
 
-    @field_validator("gemini_model", mode="before")
+    @field_validator("groq_delay_seconds", mode="before")
     @classmethod
-    def gemini_model_non_empty(cls, v: object) -> str:
-        if v is None or (isinstance(v, str) and not str(v).strip()):
-            return "gemini-2.5-flash"
-        return str(v).strip()
+    def groq_delay_coerce(cls, v: object) -> object:
+        if v is None or v == "":
+            return 2
+        return v
 
 
 settings = Settings()

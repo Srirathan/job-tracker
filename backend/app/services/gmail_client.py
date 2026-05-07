@@ -109,7 +109,7 @@ def _collect_html_parts(payload: dict[str, Any], out: list[str]) -> None:
 
 
 def _html_to_plain(html: str) -> str:
-    """Strip tags for Gemini when there is no text/plain part (common for marketing emails)."""
+    """Strip tags for AI extraction when there is no text/plain part (common for marketing emails)."""
     text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html)
     text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)

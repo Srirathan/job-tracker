@@ -13,14 +13,14 @@ from app.models.application import Application, ApplicationStatus
 from app.models.seen_message import SeenMessageId
 from app.models.user import User
 from app.services import gmail_client
-from app.services.gemini_extract import extract_job_fields
+from app.services.groq_extract import extract_job_fields
 from app.services.gmail_client import GmailDisconnectedError
 from app.services.normalize import is_same_recruitment_cycle, normalize_label
 from app.services.sheets_sync import upsert_application_row
 
 _log = logging.getLogger(__name__)
 
-_ALLOWED_GEMINI_STATUS = {"Applied", "Rejected", "Interview", "OA", "Offer"}
+_ALLOWED_EXTRACT_STATUSES = {"Applied", "Rejected", "Interview", "OA", "Offer"}
 
 _STATUS_MAP: dict[str, ApplicationStatus] = {
     "Applied": ApplicationStatus.APPLIED,
@@ -32,9 +32,9 @@ _STATUS_MAP: dict[str, ApplicationStatus] = {
 
 
 def _normalize_ai_status(raw: str) -> str:
-    """Map common Gemini variants to the five allowed status labels."""
+    """Map common model variants to the five allowed status labels."""
     s = (raw or "").strip()
-    if s in _ALLOWED_GEMINI_STATUS:
+    if s in _ALLOWED_EXTRACT_STATUSES:
         return s
     sl = re.sub(r"\s+", " ", s.lower().strip('.,!?"\''))
     if sl in ("oa", "o.a.") or sl.startswith("online assessment"):
@@ -110,7 +110,7 @@ class SyncSummary:
     updated: int
     skipped: int
     skipped_already_seen: int
-    skipped_gemini_failed: int
+    skipped_groq_failed: int
     skipped_low_confidence: int
     skipped_missing_company: int
     skipped_unknown_status: int
@@ -139,7 +139,7 @@ def _find_duplicate_application(
 
 def run_gmail_sync(db: Session, user: User) -> SyncSummary:
     scanned = new = updated = skipped = 0
-    sk_seen = sk_gem = sk_conf = sk_co = sk_st = sk_dup = 0
+    sk_seen = sk_groq = sk_conf = sk_co = sk_st = sk_dup = 0
 
     if not user.google_refresh_token:
         raise ValueError("Gmail not connected")
@@ -191,26 +191,24 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         db.commit()
 
         parsed = extract_job_fields(subject, body)
-        if parsed is None:
+        if parsed["confidence"] < 60:
             skipped += 1
-            sk_gem += 1
-            _log.info("Skipped %s: Gemini failed", msg_id)
+            if parsed.get("_groq_failed"):
+                sk_groq += 1
+                _log.info("Skipped %s: Groq extraction failed", msg_id)
+            else:
+                sk_conf += 1
+                _log.info("Skipped %s: low confidence %s", msg_id, parsed["confidence"])
             continue
 
-        if parsed.confidence < 60:
-            skipped += 1
-            sk_conf += 1
-            _log.info("Skipped %s: low confidence %s", msg_id, parsed.confidence)
-            continue
-
-        canon_status = _normalize_ai_status(parsed.status)
-        if canon_status == "Unknown" or canon_status not in _ALLOWED_GEMINI_STATUS:
+        canon_status = _normalize_ai_status(parsed["status"])
+        if canon_status == "Unknown" or canon_status not in _ALLOWED_EXTRACT_STATUSES:
             skipped += 1
             sk_st += 1
             _log.info("Skipped %s: unknown status", msg_id)
             continue
 
-        company = (parsed.company or "").strip()
+        company = (parsed["company"] or "").strip()
         if not company:
             company = (_company_from_subject(subject) or "").strip()
         if not company:
@@ -219,7 +217,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             _log.info("Skipped %s: missing company", msg_id)
             continue
 
-        role = (parsed.role or "").strip() or subject.strip() or "Unknown role"
+        role = (parsed["role"] or "").strip() or subject.strip() or "Unknown role"
         status = _STATUS_MAP[canon_status]
 
         # Same Gmail message must map to one row. Clearing seen_message_ids without deleting
@@ -299,7 +297,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         updated=updated,
         skipped=skipped,
         skipped_already_seen=sk_seen,
-        skipped_gemini_failed=sk_gem,
+        skipped_groq_failed=sk_groq,
         skipped_low_confidence=sk_conf,
         skipped_missing_company=sk_co,
         skipped_unknown_status=sk_st,

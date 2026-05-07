@@ -1,6 +1,6 @@
 # Job Tracker (Inbox → applications)
 
-Personal **job-application tracker**: connect **Gmail**, run a sync that scans recent mail with job-related wording, extracts **company / role / status** with the **Gemini API**, saves rows per user in **SQLite**, and can **mirror** them into a **Google Sheet** you own.
+Personal **job-application tracker**: connect **Gmail**, run a sync that scans recent mail with job-related wording, extracts **company / role / status** with the **Groq API** (Llama), saves rows per user in **Postgres/SQLite**, and can **mirror** them into a **Google Sheet** you own.
 
 **Stack:** FastAPI · SQLAlchemy · JWT · React (TypeScript) · Vite · Tailwind CSS
 
@@ -10,11 +10,11 @@ Personal **job-application tracker**: connect **Gmail**, run a sync that scans r
 
 - **Auth** — Register and log in; JWT on protected API routes; data scoped per user.
 - **Gmail OAuth** — Connect or disconnect Google in Settings (same OAuth client used for Sheets access).
-- **Sync** — On demand, pulls candidate messages from a configurable **lookback window**, skips already-seen IDs, parses with Gemini, and inserts or updates `applications` rows.
+- **Sync** — On demand, pulls candidate messages from a configurable **lookback window**, skips already-seen IDs, parses with **Groq**, and inserts or updates `applications` rows.
 - **Applications UI** — Table of synced applications with status badges and dates.
 - **Google Sheet** — Optional spreadsheet ID (saved in Settings or via `GOOGLE_SHEET_ID` in `.env`); rebuild writes application rows from the database.
 
-See **Requirements** below for Gemini and Google Cloud setup.
+See **Requirements** below for Groq and Google Cloud setup.
 
 ## Tech stack
 
@@ -25,7 +25,7 @@ See **Requirements** below for Gemini and Google Cloud setup.
 | Auth | **JWT** (python-jose), **bcrypt** |
 | DB (local) | **SQLite** via `DATABASE_URL` |
 | Gmail & Sheets | **Google APIs** (`google-api-python-client`, OAuth) |
-| Extraction | **Google Generative AI** (`google-generativeai`, Gemini) |
+| Extraction | **Groq** (`groq`, `llama-3.1-8b-instant`) |
 | UI | **React 19**, **TypeScript**, **Vite 8**, **Tailwind CSS v4**, **React Router** |
 
 ## Architecture (high level)
@@ -35,7 +35,7 @@ Browser ──► Vite dev server ──► FastAPI (/api/*, JWT)
                                     │
                          ┌──────────┼──────────┐
                          ▼          ▼          ▼
-                     Auth CRUD    Gmail     Gemini
+                     Auth CRUD    Gmail     Groq
                          │          oauth    extract
                          ▼                       │
                     SQLite ◄─────────────────────┘
@@ -50,7 +50,7 @@ Browser ──► Vite dev server ──► FastAPI (/api/*, JWT)
 - **Python 3.11+**
 - **Node.js** (LTS) with `npm`
 - Google Cloud **OAuth** client (Web application) with redirect URI matching `GOOGLE_REDIRECT_URI`
-- **Gemini API key** for sync extraction
+- **Groq API key** (`GROQ_API_KEY`) for sync extraction
 
 ### Backend
 
@@ -66,7 +66,7 @@ Create **`backend/.env`** (exact name). Copy from `backend/.env.example` and set
 
 - `JWT_SECRET_KEY` — long random string (do not commit).
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` (see example).
-- `GEMINI_API_KEY` — required for Gmail sync extraction.
+- `GROQ_API_KEY` — required for Gmail sync extraction (optional: `GROQ_DELAY_SECONDS`, default `2`, throttle between Groq calls).
 
 Then run:
 
@@ -113,8 +113,8 @@ All backend settings are read from **`backend/.env`**. **`backend/.env.example`*
 | `FRONTEND_URL` | Used after OAuth redirect (e.g. `http://localhost:5173`). |
 | `GOOGLE_SHEET_ID` | Optional default spreadsheet when user has not saved one in Settings. |
 | `GMAIL_SYNC_NEWER_THAN_DAYS` | Gmail “newer than” window for sync (default in code / example). |
-| `GEMINI_API_KEY` | Required for extraction during sync. |
-| `GEMINI_MODEL` | Optional override (defaults in code, e.g. `gemini-2.5-flash`). |
+| `GROQ_API_KEY` | Required for extraction during sync (empty → Unknown / confidence 0, no crash). |
+| `GROQ_DELAY_SECONDS` | Seconds to wait after each Groq call (default `2`, ~30 RPM friendly). |
 
 **Frontend (`frontend/.env`):**
 
@@ -147,7 +147,7 @@ All backend settings are read from **`backend/.env`**. **`backend/.env.example`*
 Production is not scripted in-repo; typical steps:
 
 1. Postgres (or managed DB): set `DATABASE_URL` on the API host.
-2. Run FastAPI with Uvicorn, bind `$PORT`; set secrets and Gemini key.
+2. Run FastAPI with Uvicorn, bind `$PORT`; set secrets and `GROQ_API_KEY`.
 3. **Tighten CORS** in `app/main.py` — replace `allow_origins=["*"]` with your frontend origin(s).
 4. Build the frontend (`npm run build`) and serve `dist/` with HTTPS against the API.
 
