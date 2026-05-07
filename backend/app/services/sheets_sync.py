@@ -120,6 +120,32 @@ def _stats_format_requests(tab_id: int) -> list[dict]:
     ]
 
 
+def _header_format_requests(tab_id: int) -> list[dict]:
+    """Force the row-10 header styling (prevents D10 being colored like a status cell)."""
+    grey = _hex_to_color("#f0f0f0")
+    return [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": tab_id,
+                    # Row 10 in Sheets is 0-based index 9
+                    "startRowIndex": 9,
+                    "endRowIndex": 10,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 4,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": grey,
+                        "textFormat": {"bold": True},
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat.bold)",
+            }
+        }
+    ]
+
+
 def _stats_headers_and_formulas() -> tuple[list[str], list[str]]:
     headers = [
         "Total Applied",
@@ -178,10 +204,15 @@ def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
         body=headers_body,
     ).execute()
 
+    # Always enforce header style so "Status" header cannot be colored like a status value.
+    reqs: list[dict] = []
+    reqs.extend(_header_format_requests(tab_id))
     if not was_seeded:
+        reqs.extend(_stats_format_requests(tab_id))
+    if reqs:
         service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"requests": _stats_format_requests(tab_id)},
+            body={"requests": reqs},
         ).execute()
 
 
