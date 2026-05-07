@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -19,6 +20,9 @@ from app.services.normalize import is_same_recruitment_cycle, normalize_label
 from app.services.sheets_sync import upsert_application_row
 
 _log = logging.getLogger(__name__)
+
+_SYNC_BATCH_SIZE = 5
+_SYNC_BATCH_PAUSE_SECONDS = 3
 
 _ALLOWED_EXTRACT_STATUSES = {"Applied", "Rejected", "Interview", "OA", "Offer"}
 
@@ -153,35 +157,20 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
     creds = gmail_client.build_user_credentials(user)
     query = gmail_client.build_job_search_query()
 
-    cap = settings.gmail_max_emails_per_sync
     try:
-        message_ids = gmail_client.list_message_ids(creds, query, max_ids=cap)
+        message_ids = gmail_client.list_message_ids(creds, query)
     except GmailDisconnectedError:
         raise
 
-    _log.info("Fetched %s Gmail message id(s) for this run (cap %s)", len(message_ids), cap)
+    n_messages = len(message_ids)
+    _log.info("Gmail query returned %s message ids; batch size %s", n_messages, _SYNC_BATCH_SIZE)
 
-    for msg_id in message_ids:
-        scanned += 1
-        seen = db.scalar(
-            select(SeenMessageId).where(
-                SeenMessageId.user_id == user.id,
-                SeenMessageId.gmail_message_id == msg_id,
-            )
-        )
-        if seen:
-            skipped += 1
-            sk_seen += 1
-            _log.info("Skipped %s: already seen", msg_id)
-            continue
+    idx = 0
 
-        try:
-            subject, body, received_at = gmail_client.get_message_plain_text_and_meta(creds, msg_id)
-        except GmailDisconnectedError:
-            raise
+    def process_fetched_message(msg_id: str, subject: str, body_in: str, received_at: datetime) -> None:
+        nonlocal new, updated, skipped, sk_groq, sk_conf, sk_co, sk_st, sk_dup
 
-        body = body or ""
-
+        body = body_in
         db.add(
             SeenMessageId(
                 user_id=user.id,
@@ -202,14 +191,14 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             else:
                 sk_conf += 1
                 _log.info("Skipped %s: low confidence %s", msg_id, parsed["confidence"])
-            continue
+            return
 
         canon_status = _normalize_ai_status(parsed["status"])
         if canon_status == "Unknown" or canon_status not in _ALLOWED_EXTRACT_STATUSES:
             skipped += 1
             sk_st += 1
             _log.info("Skipped %s: unknown status", msg_id)
-            continue
+            return
 
         company = (parsed["company"] or "").strip()
         if not company:
@@ -218,13 +207,11 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             skipped += 1
             sk_co += 1
             _log.info("Skipped %s: missing company", msg_id)
-            continue
+            return
 
         role = (parsed["role"] or "").strip() or subject.strip() or "Unknown role"
         status = _STATUS_MAP[canon_status]
 
-        # Same Gmail message must map to one row. Clearing seen_message_ids without deleting
-        # applications would otherwise INSERT again and hit UNIQUE(user_id, gmail_message_id).
         existing_gmail = db.scalar(
             select(Application).where(
                 Application.user_id == user.id,
@@ -240,7 +227,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             if unchanged:
                 skipped += 1
                 sk_dup += 1
-                continue
+                return
             existing_gmail.company = company
             existing_gmail.role = role
             existing_gmail.status = status
@@ -252,7 +239,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             updated += 1
             _log.info("Updated (same Gmail id): %s - %s → %s", company, role, status.value)
             upsert_application_row(user, existing_gmail)
-            continue
+            return
 
         norm_c = normalize_label(company)
         norm_r = normalize_label(role)
@@ -264,7 +251,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             if existing.status == status:
                 skipped += 1
                 sk_dup += 1
-                continue
+                return
             existing.status = status
             existing.updated_at = datetime.now(timezone.utc)
             db.add(existing)
@@ -273,7 +260,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             updated += 1
             _log.info("Updated: %s - %s → %s", company, role, status.value)
             upsert_application_row(user, existing)
-            continue
+            return
 
         app = Application(
             user_id=user.id,
@@ -289,6 +276,43 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         new += 1
         _log.info("New application: %s - %s - %s", company, role, status.value)
         upsert_application_row(user, app)
+
+    while idx < n_messages:
+        batch: list[tuple[str, str, str, datetime]] = []
+        while idx < n_messages and len(batch) < _SYNC_BATCH_SIZE:
+            msg_id = message_ids[idx]
+            idx += 1
+            scanned += 1
+            seen = db.scalar(
+                select(SeenMessageId).where(
+                    SeenMessageId.user_id == user.id,
+                    SeenMessageId.gmail_message_id == msg_id,
+                )
+            )
+            if seen:
+                skipped += 1
+                sk_seen += 1
+                _log.info("Skipped %s: already seen", msg_id)
+                continue
+            try:
+                subject, body, received_at = gmail_client.get_message_plain_text_and_meta(creds, msg_id)
+            except GmailDisconnectedError:
+                raise
+            batch.append((msg_id, subject, body or "", received_at))
+
+        n_batch = len(batch)
+        for msg_id_str, subject_s, body_s, received_at in batch:
+            process_fetched_message(msg_id_str, subject_s, body_s, received_at)
+
+        batch.clear()
+        del batch
+
+        remaining = n_messages - idx
+        _log.info("Batch complete: processed %s emails, %s remaining", n_batch, remaining)
+
+        if idx >= n_messages:
+            break
+        time.sleep(_SYNC_BATCH_PAUSE_SECONDS)
 
     user.last_synced_at = datetime.now(timezone.utc)
     db.add(user)

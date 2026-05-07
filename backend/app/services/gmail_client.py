@@ -127,7 +127,7 @@ def _header(headers: list[dict[str, str]], name: str) -> str | None:
     return None
 
 
-def list_message_ids(creds: Credentials, query: str, *, max_ids: int | None = None) -> list[str]:
+def list_message_ids(creds: Credentials, query: str) -> list[str]:
     creds = _ensure_fresh_credentials(creds)
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     ids: list[str] = []
@@ -144,8 +144,6 @@ def list_message_ids(creds: Credentials, query: str, *, max_ids: int | None = No
                 mid = m.get("id")
                 if mid:
                     ids.append(mid)
-                    if max_ids is not None and len(ids) >= max_ids:
-                        return ids
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
