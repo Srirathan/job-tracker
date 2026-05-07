@@ -11,17 +11,37 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models.application import Application
+from app.models.application import Application, ApplicationStatus
 from app.models.user import User
-from app.services.gmail_client import SCOPES, build_user_credentials, _ensure_fresh_credentials
+from app.services.gmail_client import build_user_credentials, _ensure_fresh_credentials
 from app.services.normalize import normalize_label
 
 _log = logging.getLogger(__name__)
 
 TAB = "Applications"
-RANGE_STATS_ROWS = f"{TAB}!A2:D7"
 RANGE_HEADERS = f"{TAB}!A10:D10"
 RANGE_DATA = f"{TAB}!A11:D10000"
+
+# Stats block: row 2 labels, row 3 formulas (A–F); data from row 11; headers row 10.
+STATS_VALUE_RANGE = f"{TAB}!A2:F3"
+
+
+def _hex_to_color(rgb_hex: str) -> dict[str, float]:
+    h = rgb_hex.lstrip("#")
+    return {
+        "red": int(h[0:2], 16) / 255.0,
+        "green": int(h[2:4], 16) / 255.0,
+        "blue": int(h[4:6], 16) / 255.0,
+    }
+
+
+STATUS_CELL_BACKGROUND: dict[str, dict[str, float]] = {
+    ApplicationStatus.APPLIED.value: _hex_to_color("#cfe2ff"),
+    ApplicationStatus.INTERVIEW.value: _hex_to_color("#fff3cd"),
+    ApplicationStatus.OA.value: _hex_to_color("#e8d5ff"),
+    ApplicationStatus.REJECTED.value: _hex_to_color("#ffd7d7"),
+    ApplicationStatus.OFFER.value: _hex_to_color("#d4edda"),
+}
 
 
 def effective_sheet_id(user: User) -> str | None:
@@ -37,40 +57,96 @@ def _sheets_service(creds: Credentials):
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
-def _stats_region_blank(service, spreadsheet_id: str) -> bool:
-    """True when rows 2–7 (stats block) have no content — first sync can seed formulas."""
+def _stats_already_seeded(service, spreadsheet_id: str) -> bool:
+    """True when A2 is the horizontal stats header (do not overwrite rows 2–3)."""
     try:
-        res = service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=RANGE_STATS_ROWS).execute()
+        res = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=f"{TAB}!A2")
+            .execute()
+        )
+        rows = res.get("values") or []
+        if not rows or not rows[0]:
+            return False
+        return str(rows[0][0]).strip() == "Total Applied"
     except HttpError:
         return False
-    rows = res.get("values") or []
-    for row in rows:
-        for cell in row:
-            if cell is not None and str(cell).strip():
-                return False
-    return True
+
+
+def _stats_format_requests(tab_id: int) -> list[dict]:
+    grey = _hex_to_color("#f0f0f0")
+    return [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": tab_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 6,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": grey,
+                        "textFormat": {"bold": True},
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat.bold)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": tab_id,
+                    "startRowIndex": 2,
+                    "endRowIndex": 3,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 6,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True, "fontSize": 12},
+                    }
+                },
+                "fields": "userEnteredFormat.textFormat",
+            }
+        },
+    ]
 
 
 def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
-    """Write stats (rows 2–7) and headers (row 10) once if stats area is empty."""
-    if not _stats_region_blank(service, spreadsheet_id):
+    """Seed horizontal stats (rows 2–3) and column headers (row 10) once when A2 is empty."""
+    if _stats_already_seeded(service, spreadsheet_id):
         return
-    stats_body = {
-        "values": [
-            ["", "", "", ""],
-            ["Total Applied", '=COUNTIF(D11:D1000,"Applied")', "", ""],
-            ["Interviews", '=COUNTIF(D11:D1000,"Interview")', "", ""],
-            ["Online Assessment", '=COUNTIF(D11:D1000,"OA")', "", ""],
-            ["Rejected", '=COUNTIF(D11:D1000,"Rejected")', "", ""],
-            ["Offers", '=COUNTIF(D11:D1000,"Offer")', "", ""],
-            ["Response Rate", '=IF(B2>0,(B3+B4+B5+B6)/B2,"")', "", ""],
-        ]
-    }
+
+    tab_id = _tab_sheet_id(service, spreadsheet_id, TAB)
+    if tab_id is None:
+        return
+
+    stats_values = [
+        [
+            "Total Applied",
+            "Interviews",
+            "Online Assessment",
+            "Rejected",
+            "Offers",
+            "Response Rate",
+        ],
+        [
+            '=(COUNTIF(D11:D1000,"Applied")+COUNTIF(D11:D1000,"Interview")+COUNTIF(D11:D1000,"OA")+COUNTIF(D11:D1000,"Rejected")+COUNTIF(D11:D1000,"Offer"))',
+            '=COUNTIF(D11:D1000,"Interview")',
+            '=COUNTIF(D11:D1000,"OA")',
+            '=COUNTIF(D11:D1000,"Rejected")',
+            '=COUNTIF(D11:D1000,"Offer")',
+            '=IF(A3=0,"0%",TEXT((B3+C3+D3+E3)/A3,"0%"))',
+        ],
+    ]
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range=f"{TAB}!A1:D7",
+        range=STATS_VALUE_RANGE,
         valueInputOption="USER_ENTERED",
-        body=stats_body,
+        body={"values": stats_values},
     ).execute()
 
     headers_body = {"values": [["Date", "Company", "Role", "Status"]]}
@@ -79,6 +155,11 @@ def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
         range=RANGE_HEADERS,
         valueInputOption="USER_ENTERED",
         body=headers_body,
+    ).execute()
+
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": _stats_format_requests(tab_id)},
     ).execute()
 
 
@@ -106,6 +187,107 @@ def _date_cell(dt: datetime) -> str:
     return dt.date().isoformat()
 
 
+def _data_row_count(service, spreadsheet_id: str) -> int:
+    """Number of data rows from row 11 downward that have any value in column A."""
+    try:
+        res = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=f"{TAB}!A11:A10000")
+            .execute()
+        )
+    except HttpError:
+        return 0
+    values = res.get("values") or []
+    n = 0
+    for i, row in enumerate(values):
+        if row and any(str(c).strip() for c in row):
+            n = i + 1
+    return n
+
+
+def sort_sheet_by_date(user: User) -> None:
+    """Sort data rows 11+ by column A (date) descending."""
+    sheet_id = effective_sheet_id(user)
+    if not sheet_id or not user.google_refresh_token:
+        return
+    try:
+        creds = build_user_credentials(user)
+        service = _sheets_service(creds)
+        tab_id = _tab_sheet_id(service, sheet_id, TAB)
+        if tab_id is None:
+            return
+        n = _data_row_count(service, sheet_id)
+        if n < 2:
+            return
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={
+                "requests": [
+                    {
+                        "sortRange": {
+                            "range": {
+                                "sheetId": tab_id,
+                                "startRowIndex": 10,
+                                "endRowIndex": 10 + n,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": 4,
+                            },
+                            "sortSpecs": [{"dimensionIndex": 0, "sortOrder": "DESCENDING"}],
+                        }
+                    }
+                ]
+            },
+        ).execute()
+    except HttpError as exc:
+        _log.warning("Sheets sort failed for user %s: %s", user.id, exc)
+    except Exception:
+        _log.warning("Sheets sort unexpected error for user %s", user.id, exc_info=True)
+
+
+def _apply_status_cell_color(
+    service,
+    spreadsheet_id: str,
+    tab_id: int,
+    row_1based: int,
+    status_value: str,
+) -> None:
+    bg = STATUS_CELL_BACKGROUND.get(status_value, _hex_to_color("#ffffff"))
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": tab_id,
+                            "startRowIndex": row_1based - 1,
+                            "endRowIndex": row_1based,
+                            "startColumnIndex": 3,
+                            "endColumnIndex": 4,
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": bg}},
+                        "fields": "userEnteredFormat.backgroundColor",
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+
+def _find_match_row(
+    rows: list[list[str]], want_c: str, want_r: str
+) -> int | None:
+    for i, row in enumerate(rows):
+        if len(row) < 3:
+            continue
+        b = row[1] if len(row) > 1 else ""
+        c = row[2] if len(row) > 2 else ""
+        if normalize_label(b) == want_c and normalize_label(c) == want_r:
+            return 11 + i
+    return None
+
+
 def upsert_application_row(user: User, application: Application) -> None:
     sheet_id = effective_sheet_id(user)
     if not sheet_id or not user.google_refresh_token:
@@ -114,20 +296,18 @@ def upsert_application_row(user: User, application: Application) -> None:
         creds = build_user_credentials(user)
         service = _sheets_service(creds)
         ensure_stats_and_headers(service, sheet_id)
+        tab_id = _tab_sheet_id(service, sheet_id, TAB)
+        if tab_id is None:
+            return
+
         rows = _read_data_rows(service, sheet_id)
         want_c = normalize_label(application.company)
         want_r = normalize_label(application.role)
-        match_row: int | None = None
-        for i, row in enumerate(rows):
-            if len(row) < 3:
-                continue
-            b = row[1] if len(row) > 1 else ""
-            c = row[2] if len(row) > 2 else ""
-            if normalize_label(b) == want_c and normalize_label(c) == want_r:
-                match_row = 11 + i
-                break
+        match_row = _find_match_row(rows, want_c, want_r)
+
         date_s = _date_cell(application.email_date)
         status_s = application.status.value
+
         if match_row is not None:
             service.spreadsheets().values().update(
                 spreadsheetId=sheet_id,
@@ -135,6 +315,7 @@ def upsert_application_row(user: User, application: Application) -> None:
                 valueInputOption="USER_ENTERED",
                 body={"values": [[date_s, application.company, application.role, status_s]]},
             ).execute()
+            _apply_status_cell_color(service, sheet_id, tab_id, match_row, status_s)
         else:
             new_row = [date_s, application.company, application.role, status_s]
             service.spreadsheets().values().append(
@@ -144,6 +325,11 @@ def upsert_application_row(user: User, application: Application) -> None:
                 insertDataOption="INSERT_ROWS",
                 body={"values": [new_row]},
             ).execute()
+            rows_after = _read_data_rows(service, sheet_id)
+            new_match = _find_match_row(rows_after, want_c, want_r)
+            if new_match is not None:
+                _apply_status_cell_color(service, sheet_id, tab_id, new_match, status_s)
+
         _log.info("Sheets: wrote %s - %s - %s", application.company, application.role, status_s)
     except HttpError as exc:
         _log.warning("Sheets API failed for user %s: %s", user.id, exc)
@@ -216,6 +402,9 @@ def rebuild_sheet(db: Session, user: User) -> int:
         raise
 
     ensure_stats_and_headers(service, sheet_id)
+    tab_id = _tab_sheet_id(service, sheet_id, TAB)
+    if tab_id is None:
+        raise ValueError("Applications tab not found")
 
     apps = list(
         db.scalars(
@@ -225,15 +414,20 @@ def rebuild_sheet(db: Session, user: User) -> int:
         ).all()
     )
     if not apps:
+        sort_sheet_by_date(user)
         return 0
 
-    values = [
-        [_date_cell(a.email_date), a.company, a.role, a.status.value] for a in apps
-    ]
+    values = [[_date_cell(a.email_date), a.company, a.role, a.status.value] for a in apps]
     service.spreadsheets().values().update(
         spreadsheetId=sheet_id,
         range=f"{TAB}!A11",
         valueInputOption="USER_ENTERED",
         body={"values": values},
     ).execute()
+
+    for i, a in enumerate(apps):
+        row_1based = 11 + i
+        _apply_status_cell_color(service, sheet_id, tab_id, row_1based, a.status.value)
+
+    sort_sheet_by_date(user)
     return len(values)

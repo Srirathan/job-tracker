@@ -17,7 +17,7 @@ from app.services import gmail_client
 from app.services.groq_extract import extract_job_fields
 from app.services.gmail_client import GmailDisconnectedError
 from app.services.normalize import is_same_recruitment_cycle, normalize_label
-from app.services.sheets_sync import upsert_application_row
+from app.services.sheets_sync import sort_sheet_by_date, upsert_application_row
 
 _log = logging.getLogger(__name__)
 
@@ -317,6 +317,8 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
     user.last_synced_at = datetime.now(timezone.utc)
     db.add(user)
     db.commit()
+
+    sort_sheet_by_date(user)
 
     return SyncSummary(
         scanned=scanned,

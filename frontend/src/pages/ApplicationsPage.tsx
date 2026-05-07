@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import * as applicationsApi from '../api/applications'
 import type { ApplicationUpsertBody } from '../api/applications'
+import * as authApi from '../api/auth'
 import * as settingsApi from '../api/settings'
 import * as syncApi from '../api/sync'
 import { StatusBadge } from '../components/StatusBadge'
@@ -47,12 +48,32 @@ const emptyForm = (): { company: string; role: string; status: ApplicationStatus
   date: todayInputDate(),
 })
 
+type StatusFilter = 'All' | ApplicationStatus
+
+function formatRelativeSyncedAt(iso: string | null | undefined): string {
+  if (iso == null || iso === '') return 'Never'
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return 'Unknown'
+  const sec = Math.floor((Date.now() - t) / 1000)
+  if (sec < 10) return 'just now'
+  if (sec < 60) return `${sec} second${sec === 1 ? '' : 's'} ago`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} minute${min === 1 ? '' : 's'} ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`
+  const day = Math.floor(hr / 24)
+  if (day < 7) return `${day} day${day === 1 ? '' : 's'} ago`
+  return formatDate(iso)
+}
+
 export function ApplicationsPage() {
   const [rows, setRows] = useState<Application[]>([])
   const [error, setError] = useState<string | null>(null)
   const [syncBusy, setSyncBusy] = useState(false)
   const [lastSync, setLastSync] = useState<syncApi.SyncSummary | null>(null)
   const [lookbackDays, setLookbackDays] = useState<number | null>(null)
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('All')
 
   const [modalMode, setModalMode] = useState<'add' | 'edit' | null>(null)
   const [editId, setEditId] = useState<number | null>(null)
@@ -71,9 +92,24 @@ export function ApplicationsPage() {
     }
   }, [])
 
+  const refreshMe = useCallback(() => {
+    void authApi.me().then((u) => setLastSyncedAt(u.last_synced_at ?? null))
+  }, [])
+
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void load()
+        refreshMe()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange)
+  }, [load, refreshMe])
 
   useEffect(() => {
     void settingsApi
@@ -81,6 +117,32 @@ export function ApplicationsPage() {
       .then((s) => setLookbackDays(s.gmail_sync_lookback_days))
       .catch(() => setLookbackDays(null))
   }, [])
+
+  useEffect(() => {
+    refreshMe()
+  }, [refreshMe])
+
+  const filteredRows = useMemo(() => {
+    if (statusFilter === 'All') return rows
+    return rows.filter((r) => r.status === statusFilter)
+  }, [rows, statusFilter])
+
+  const summaryLine = useMemo(() => {
+    const total = rows.length
+    const interview = rows.filter((r) => r.status === 'Interview').length
+    const rejected = rows.filter((r) => r.status === 'Rejected').length
+    const offer = rows.filter((r) => r.status === 'Offer').length
+    return `${total} applications — ${interview} interviews · ${rejected} rejected · ${offer} offers`
+  }, [rows])
+
+  const filterButtons: { label: string; value: StatusFilter }[] = [
+    { label: 'All', value: 'All' },
+    { label: 'Applied', value: 'Applied' },
+    { label: 'Interview', value: 'Interview' },
+    { label: 'OA', value: 'OA' },
+    { label: 'Rejected', value: 'Rejected' },
+    { label: 'Offer', value: 'Offer' },
+  ]
 
   const openAdd = () => {
     setModalMode('add')
@@ -131,6 +193,7 @@ export function ApplicationsPage() {
         await applicationsApi.updateApplication(editId, body)
       }
       await load()
+      refreshMe()
       closeModal()
     } catch (e) {
       setModalError(e instanceof Error ? e.message : 'Save failed')
@@ -142,6 +205,7 @@ export function ApplicationsPage() {
     try {
       await applicationsApi.deleteApplication(id)
       await load()
+      refreshMe()
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Delete failed')
@@ -156,6 +220,7 @@ export function ApplicationsPage() {
       const summary = await syncApi.syncGmail()
       setLastSync(summary)
       await load()
+      refreshMe()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sync failed')
     } finally {
@@ -178,22 +243,25 @@ export function ApplicationsPage() {
             ) : null}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => openAdd()}
-            className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
-          >
-            Add application
-          </button>
-          <button
-            type="button"
-            disabled={syncBusy}
-            onClick={() => void onSync()}
-            className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-          >
-            {syncBusy ? 'Syncing…' : 'Sync Gmail'}
-          </button>
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => openAdd()}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
+            >
+              Add application
+            </button>
+            <button
+              type="button"
+              disabled={syncBusy}
+              onClick={() => void onSync()}
+              className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+            >
+              {syncBusy ? 'Syncing…' : 'Sync Gmail'}
+            </button>
+          </div>
+          <p className="text-xs text-slate-500">Last synced: {formatRelativeSyncedAt(lastSyncedAt)}</p>
         </div>
       </div>
 
@@ -233,9 +301,36 @@ export function ApplicationsPage() {
 
       {error ? <p className="text-sm text-rose-600">{error}</p> : null}
 
+      {rows.length > 0 ? (
+        <p className="text-sm text-slate-700">{summaryLine}</p>
+      ) : null}
+
+      {rows.length > 0 ? (
+        <div className="flex flex-wrap gap-2">
+          {filterButtons.map((b) => (
+            <button
+              key={b.label}
+              type="button"
+              onClick={() => setStatusFilter(b.value)}
+              className={
+                statusFilter === b.value
+                  ? 'rounded-full bg-slate-900 px-3 py-1 text-xs font-medium text-white'
+                  : 'rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50'
+              }
+            >
+              {b.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       {rows.length === 0 && !error ? (
         <p className="rounded-lg border border-dashed border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-600">
           No applications yet. Click Sync Gmail or Add application to start.
+        </p>
+      ) : filteredRows.length === 0 && rows.length > 0 ? (
+        <p className="rounded-lg border border-dashed border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-600">
+          No applications match this filter.
         </p>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
@@ -250,7 +345,7 @@ export function ApplicationsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map((r) => (
+              {filteredRows.map((r) => (
                 <tr key={r.id} className="hover:bg-slate-50/80">
                   <td className="whitespace-nowrap px-4 py-3 text-slate-700">{formatDate(r.date)}</td>
                   <td className="px-4 py-3 text-slate-900">{r.company}</td>
