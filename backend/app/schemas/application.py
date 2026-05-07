@@ -6,6 +6,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.application import ApplicationStatus
 
 
+class SheetWebhookUpdateIn(BaseModel):
+    """Body from Google Apps Script on edits to Company / Role / Status (sheet row ≥ 11)."""
+
+    row_number: int = Field(ge=1)
+    company: str
+    role: str
+    status: str
+    #: Optional ownership filter — send SpreadsheetApp.getActiveSpreadsheet().getId() from the Script.
+    spreadsheet_id: Optional[str] = None
+
+
 class ApplicationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 

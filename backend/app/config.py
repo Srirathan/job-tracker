@@ -22,6 +22,9 @@ class Settings(BaseSettings):
 
     google_sheet_id: str = ""
 
+    #: Shared secret for Google Apps Script → PUT /api/applications/sheet-update (X-Sheet-Token).
+    sheet_sync_token: str = ""
+
     gmail_sync_newer_than_days: int = 31
 
     groq_api_key: str = ""
