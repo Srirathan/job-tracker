@@ -21,6 +21,9 @@ _log = logging.getLogger(__name__)
 TAB = "Applications"
 RANGE_HEADERS = f"{TAB}!A10:D10"
 RANGE_DATA = f"{TAB}!A11:D10000"
+# Memory: only scan first 200 data rows when matching company+role (upsert / delete).
+RANGE_MATCH_SLICE = f"{TAB}!A11:D200"
+RANGE_ROW_COUNT_SLICE = f"{TAB}!A11:A500"
 
 # Stats block: row 2 labels, row 3 formulas (A–F); data from row 11; headers row 10.
 STATS_VALUE_RANGE = f"{TAB}!A2:F3"
@@ -163,12 +166,15 @@ def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
     ).execute()
 
 
-def _read_data_rows(service, spreadsheet_id: str) -> list[list[str]]:
+def _read_match_rows(service, spreadsheet_id: str) -> list[list[str]]:
+    """Bounded read for row matching; caller should ``del`` the list when done."""
     try:
-        res = service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=RANGE_DATA).execute()
+        res = service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=RANGE_MATCH_SLICE).execute()
     except HttpError:
         return []
-    return res.get("values") or []
+    rows = res.get("values") or []
+    del res
+    return rows
 
 
 def _tab_sheet_id(service, spreadsheet_id: str, title: str) -> int | None:
@@ -188,21 +194,23 @@ def _date_cell(dt: datetime) -> str:
 
 
 def _data_row_count(service, spreadsheet_id: str) -> int:
-    """Number of data rows from row 11 downward that have any value in column A."""
+    """Approximate data height from column A up to 500 rows (memory cap)."""
     try:
         res = (
             service.spreadsheets()
             .values()
-            .get(spreadsheetId=spreadsheet_id, range=f"{TAB}!A11:A10000")
+            .get(spreadsheetId=spreadsheet_id, range=RANGE_ROW_COUNT_SLICE)
             .execute()
         )
     except HttpError:
         return 0
     values = res.get("values") or []
+    del res
     n = 0
     for i, row in enumerate(values):
         if row and any(str(c).strip() for c in row):
             n = i + 1
+    del values
     return n
 
 
@@ -300,10 +308,11 @@ def upsert_application_row(user: User, application: Application) -> None:
         if tab_id is None:
             return
 
-        rows = _read_data_rows(service, sheet_id)
+        rows = _read_match_rows(service, sheet_id)
         want_c = normalize_label(application.company)
         want_r = normalize_label(application.role)
         match_row = _find_match_row(rows, want_c, want_r)
+        del rows
 
         date_s = _date_cell(application.email_date)
         status_s = application.status.value
@@ -325,8 +334,9 @@ def upsert_application_row(user: User, application: Application) -> None:
                 insertDataOption="INSERT_ROWS",
                 body={"values": [new_row]},
             ).execute()
-            rows_after = _read_data_rows(service, sheet_id)
+            rows_after = _read_match_rows(service, sheet_id)
             new_match = _find_match_row(rows_after, want_c, want_r)
+            del rows_after
             if new_match is not None:
                 _apply_status_cell_color(service, sheet_id, tab_id, new_match, status_s)
 
@@ -349,7 +359,7 @@ def delete_application_row(user: User, company: str, role: str) -> None:
         tab_id = _tab_sheet_id(service, sheet_id, TAB)
         if tab_id is None:
             return
-        rows = _read_data_rows(service, sheet_id)
+        rows = _read_match_rows(service, sheet_id)
         want_c = normalize_label(company)
         want_r = normalize_label(role)
         for i, row in enumerate(rows):
@@ -377,8 +387,10 @@ def delete_application_row(user: User, company: str, role: str) -> None:
                         ]
                     },
                 ).execute()
+                del rows
                 _log.info("Sheets: deleted row for %s - %s", company, role)
                 return
+        del rows
     except HttpError as exc:
         _log.warning("Sheets delete failed for user %s: %s", user.id, exc)
     except Exception:

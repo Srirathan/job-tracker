@@ -3,8 +3,9 @@ from __future__ import annotations
 import base64
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 from html import unescape
 from typing import Any
 
@@ -18,7 +19,7 @@ from app.models.user import User
 
 _log = logging.getLogger(__name__)
 
-MAX_PLAIN_BODY_CHARS = 1000
+MAX_PLAIN_BODY_CHARS = 500
 
 SCOPES: list[str] = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -43,6 +44,17 @@ JOB_KEYWORDS = [
 
 class GmailDisconnectedError(Exception):
     """Raised when Gmail returns 401 (refresh token revoked or expired)."""
+
+
+@dataclass(slots=True)
+class GmailMessageSyncFields:
+    """Minimal fields returned after fetch (no retained raw Gmail API blob)."""
+
+    id: str
+    subject: str
+    body: str
+    date: datetime
+    sender: str
 
 
 def gmail_oauth_configured() -> bool:
@@ -127,7 +139,8 @@ def _header(headers: list[dict[str, str]], name: str) -> str | None:
     return None
 
 
-def list_message_ids(creds: Credentials, query: str) -> list[str]:
+def list_message_ids(creds: Credentials, query: str, *, max_ids: int | None = None) -> list[str]:
+    """List message IDs (newest batches first); stop paging when ``max_ids`` reached."""
     creds = _ensure_fresh_credentials(creds)
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     ids: list[str] = []
@@ -135,16 +148,19 @@ def list_message_ids(creds: Credentials, query: str) -> list[str]:
     try:
         while True:
             req = (
-                service.users()
-                .messages()
-                .list(userId="me", q=query, pageToken=page_token, maxResults=100)
+                service.users().messages().list(userId="me", q=query, pageToken=page_token, maxResults=100)
             )
             resp = req.execute()
+            del req
             for m in resp.get("messages") or []:
                 mid = m.get("id")
                 if mid:
                     ids.append(mid)
+                    if max_ids is not None and len(ids) >= max_ids:
+                        del resp
+                        return ids
             page_token = resp.get("nextPageToken")
+            del resp
             if not page_token:
                 break
     except HttpError as exc:
@@ -154,12 +170,15 @@ def list_message_ids(creds: Credentials, query: str) -> list[str]:
     return ids
 
 
-def get_message_plain_text_and_meta(creds: Credentials, message_id: str) -> tuple[str, str, datetime]:
-    """Return (subject, plain_body, received_at)."""
+def fetch_message_for_sync(creds: Credentials, message_id: str) -> GmailMessageSyncFields:
+    """
+    Fetch one message, extract id / subject / body (truncated) / date / sender,
+    discard the raw API response payload before returning.
+    """
     creds = _ensure_fresh_credentials(creds)
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     try:
-        msg = (
+        raw = (
             service.users()
             .messages()
             .get(userId="me", id=message_id, format="full")
@@ -170,11 +189,19 @@ def get_message_plain_text_and_meta(creds: Credentials, message_id: str) -> tupl
             raise GmailDisconnectedError from exc
         raise
 
-    payload = msg.get("payload") or {}
+    resolved_id = str(raw.get("id") or message_id)
+    internal_top = raw.get("internalDate")
+    payload = raw.get("payload") or {}
+    del raw
+
     headers = payload.get("headers") or []
     subject = _header(headers, "Subject") or ""
+
+    from_val = _header(headers, "From") or ""
+    name_addr = parseaddr(from_val)
+    sender = (name_addr[1] or name_addr[0] or "").strip()
+
     date_hdr = _header(headers, "Date")
-    received_at: datetime
     if date_hdr:
         try:
             received_at = parsedate_to_datetime(date_hdr)
@@ -183,22 +210,40 @@ def get_message_plain_text_and_meta(creds: Credentials, message_id: str) -> tupl
         except (TypeError, ValueError, OverflowError):
             received_at = datetime.now(timezone.utc)
     else:
-        internal = int(msg.get("internalDate", "0"))
+        internal = int(internal_top) if internal_top else 0
         if internal:
             received_at = datetime.fromtimestamp(internal / 1000.0, tz=timezone.utc)
         else:
             received_at = datetime.now(timezone.utc)
 
+    del headers
+
     bodies: list[str] = []
     _collect_plain_parts(payload, bodies)
     plain = "\n".join(bodies).strip()
+    del bodies
     if not plain:
         html_parts: list[str] = []
         _collect_html_parts(payload, html_parts)
         if html_parts:
             plain = _html_to_plain("\n".join(html_parts))
+        del html_parts
+
+    del payload
 
     if len(plain) > MAX_PLAIN_BODY_CHARS:
         plain = plain[:MAX_PLAIN_BODY_CHARS]
 
-    return subject, plain, received_at
+    return GmailMessageSyncFields(
+        id=resolved_id,
+        subject=subject,
+        body=plain,
+        date=received_at,
+        sender=sender,
+    )
+
+
+def get_message_plain_text_and_meta(creds: Credentials, message_id: str) -> tuple[str, str, datetime]:
+    """Backward-compatible shortcut: subject, plain_body (truncated to 500), received_at."""
+    g = fetch_message_for_sync(creds, message_id)
+    return g.subject, g.body, g.date

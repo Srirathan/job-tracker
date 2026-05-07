@@ -92,14 +92,13 @@ def extract_job_fields(subject: str, body: str) -> dict[str, Any]:
     text = ""
     try:
         client = Groq(api_key=settings.groq_api_key)
-        completion = client.chat.completions.create(
+        response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
-        msg = completion.choices[0].message
-        text = (msg.content or "").strip()
-        del completion, msg
+        text = ((response.choices[0].message.content or "").strip())
+        del response
     except Exception:
         _log.exception("Groq API request failed (model=%s)", GROQ_MODEL)
         _sleep_between_calls()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import re
 import time
@@ -21,8 +22,8 @@ from app.services.sheets_sync import sort_sheet_by_date, upsert_application_row
 
 _log = logging.getLogger(__name__)
 
-_SYNC_BATCH_SIZE = 5
-_SYNC_BATCH_PAUSE_SECONDS = 3
+_SYNC_BATCH_SIZE = 3
+_SYNC_BATCH_PAUSE_SECONDS = 5
 
 _ALLOWED_EXTRACT_STATUSES = {"Applied", "Rejected", "Interview", "OA", "Offer"}
 
@@ -157,15 +158,20 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
     creds = gmail_client.build_user_credentials(user)
     query = gmail_client.build_job_search_query()
 
+    cap = settings.gmail_max_emails_per_sync
     try:
-        message_ids = gmail_client.list_message_ids(creds, query)
+        message_ids = gmail_client.list_message_ids(creds, query, max_ids=cap)
     except GmailDisconnectedError:
         raise
 
     n_messages = len(message_ids)
-    _log.info("Gmail query returned %s message ids; batch size %s", n_messages, _SYNC_BATCH_SIZE)
-
-    idx = 0
+    _log.info("Sync capped at %s emails this run", cap)
+    _log.info(
+        "Gmail query yielded %s message id(s); process %s at a time, %ss pause + gc between groups",
+        n_messages,
+        _SYNC_BATCH_SIZE,
+        _SYNC_BATCH_PAUSE_SECONDS,
+    )
 
     def process_fetched_message(msg_id: str, subject: str, body_in: str, received_at: datetime) -> None:
         nonlocal new, updated, skipped, sk_groq, sk_conf, sk_co, sk_st, sk_dup
@@ -277,42 +283,51 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         _log.info("New application: %s - %s - %s", company, role, status.value)
         upsert_application_row(user, app)
 
-    while idx < n_messages:
-        batch: list[tuple[str, str, str, datetime]] = []
-        while idx < n_messages and len(batch) < _SYNC_BATCH_SIZE:
-            msg_id = message_ids[idx]
-            idx += 1
-            scanned += 1
-            seen = db.scalar(
-                select(SeenMessageId).where(
-                    SeenMessageId.user_id == user.id,
-                    SeenMessageId.gmail_message_id == msg_id,
-                )
+    fetches_in_group = 0
+    fetched_total = 0
+
+    for msg_id in message_ids:
+        scanned += 1
+
+        seen = db.scalar(
+            select(SeenMessageId).where(
+                SeenMessageId.user_id == user.id,
+                SeenMessageId.gmail_message_id == msg_id,
             )
-            if seen:
-                skipped += 1
-                sk_seen += 1
-                _log.info("Skipped %s: already seen", msg_id)
-                continue
-            try:
-                subject, body, received_at = gmail_client.get_message_plain_text_and_meta(creds, msg_id)
-            except GmailDisconnectedError:
-                raise
-            batch.append((msg_id, subject, body or "", received_at))
+        )
+        if seen:
+            skipped += 1
+            sk_seen += 1
+            _log.info("Skipped %s: already seen", msg_id)
+            continue
 
-        n_batch = len(batch)
-        for msg_id_str, subject_s, body_s, received_at in batch:
-            process_fetched_message(msg_id_str, subject_s, body_s, received_at)
+        gm = gmail_client.fetch_message_for_sync(creds, msg_id)
+        subject_in = gm.subject
+        body_in = gm.body
+        recv = gm.date
+        del gm
 
-        batch.clear()
-        del batch
+        process_fetched_message(msg_id, subject_in, body_in, recv)
 
-        remaining = n_messages - idx
-        _log.info("Batch complete: processed %s emails, %s remaining", n_batch, remaining)
+        del subject_in, body_in, recv
 
-        if idx >= n_messages:
-            break
-        time.sleep(_SYNC_BATCH_PAUSE_SECONDS)
+        fetches_in_group += 1
+        fetched_total += 1
+
+        if fetches_in_group >= _SYNC_BATCH_SIZE:
+            gc.collect()
+            _log.info(
+                "Batch complete: %s email(s) fetched since last pause; scanned %s / %s id(s)",
+                _SYNC_BATCH_SIZE,
+                scanned,
+                n_messages,
+            )
+            if scanned < n_messages:
+                time.sleep(_SYNC_BATCH_PAUSE_SECONDS)
+            fetches_in_group = 0
+
+    if fetches_in_group > 0:
+        gc.collect()
 
     user.last_synced_at = datetime.now(timezone.utc)
     db.add(user)
