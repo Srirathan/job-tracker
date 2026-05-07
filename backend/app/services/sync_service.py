@@ -22,8 +22,8 @@ from app.services.sheets_sync import sort_sheet_by_date, upsert_application_row
 
 _log = logging.getLogger(__name__)
 
-_SYNC_BATCH_SIZE = 3
-_SYNC_BATCH_PAUSE_SECONDS = 5
+_SYNC_BATCH_SIZE = 2
+_SYNC_BATCH_PAUSE_SECONDS = 8
 
 _ALLOWED_EXTRACT_STATUSES = {"Applied", "Rejected", "Interview", "OA", "Offer"}
 
@@ -245,6 +245,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             updated += 1
             _log.info("Updated (same Gmail id): %s - %s → %s", company, role, status.value)
             upsert_application_row(user, existing_gmail)
+            gc.collect()
             return
 
         norm_c = normalize_label(company)
@@ -266,6 +267,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             updated += 1
             _log.info("Updated: %s - %s → %s", company, role, status.value)
             upsert_application_row(user, existing)
+            gc.collect()
             return
 
         app = Application(
@@ -282,6 +284,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         new += 1
         _log.info("New application: %s - %s - %s", company, role, status.value)
         upsert_application_row(user, app)
+        gc.collect()
 
     fetches_in_group = 0
     fetched_total = 0

@@ -19,7 +19,7 @@ from app.models.user import User
 
 _log = logging.getLogger(__name__)
 
-MAX_PLAIN_BODY_CHARS = 500
+MAX_PLAIN_BODY_CHARS = 300
 
 SCOPES: list[str] = [
     "https://www.googleapis.com/auth/gmail.readonly",

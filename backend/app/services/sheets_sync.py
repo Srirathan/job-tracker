@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 from datetime import datetime, timezone
 
@@ -24,7 +25,7 @@ RANGE_DATA = f"{TAB}!A11:D10000"
 # Rebuild should wipe everything below the stats rows (keeps A2:F3).
 RANGE_REBUILD_CLEAR = f"{TAB}!A4:F10000"
 # Memory: only scan first 200 data rows when matching company+role (upsert / delete).
-RANGE_MATCH_SLICE = f"{TAB}!A11:D200"
+RANGE_MATCH_SLICE = f"{TAB}!A11:D300"
 RANGE_ROW_COUNT_SLICE = f"{TAB}!A11:A500"
 
 # Stats block: row 2 labels, row 3 formulas (A–F); data from row 11; headers row 10.
@@ -224,6 +225,7 @@ def _read_match_rows(service, spreadsheet_id: str) -> list[list[str]]:
         return []
     rows = res.get("values") or []
     del res
+    gc.collect()
     return rows
 
 
@@ -275,9 +277,8 @@ def sort_sheet_by_date(user: User) -> None:
         tab_id = _tab_sheet_id(service, sheet_id, TAB)
         if tab_id is None:
             return
-        n = _data_row_count(service, sheet_id)
-        if n < 2:
-            return
+        # Server-side sort only; avoid reading any sheet values into memory.
+        # Sort a fixed bounded range (up to 1000 rows) starting at row 11.
         service.spreadsheets().batchUpdate(
             spreadsheetId=sheet_id,
             body={
@@ -287,7 +288,7 @@ def sort_sheet_by_date(user: User) -> None:
                             "range": {
                                 "sheetId": tab_id,
                                 "startRowIndex": 10,
-                                "endRowIndex": 10 + n,
+                                "endRowIndex": 1010,
                                 "startColumnIndex": 0,
                                 "endColumnIndex": 4,
                             },
@@ -297,6 +298,7 @@ def sort_sheet_by_date(user: User) -> None:
                 ]
             },
         ).execute()
+        gc.collect()
     except HttpError as exc:
         _log.warning("Sheets sort failed for user %s: %s", user.id, exc)
     except Exception:
@@ -374,7 +376,9 @@ def upsert_application_row(user: User, application: Application) -> None:
                 valueInputOption="USER_ENTERED",
                 body={"values": [[date_s, application.company, application.role, status_s]]},
             ).execute()
+            gc.collect()
             _apply_status_cell_color(service, sheet_id, tab_id, match_row, status_s)
+            gc.collect()
         else:
             new_row = [date_s, application.company, application.role, status_s]
             service.spreadsheets().values().append(
@@ -384,11 +388,13 @@ def upsert_application_row(user: User, application: Application) -> None:
                 insertDataOption="INSERT_ROWS",
                 body={"values": [new_row]},
             ).execute()
+            gc.collect()
             rows_after = _read_match_rows(service, sheet_id)
             new_match = _find_match_row(rows_after, want_c, want_r)
             del rows_after
             if new_match is not None:
                 _apply_status_cell_color(service, sheet_id, tab_id, new_match, status_s)
+                gc.collect()
 
         _log.info("Sheets: wrote %s - %s - %s", application.company, application.role, status_s)
     except HttpError as exc:
@@ -470,28 +476,46 @@ def rebuild_sheet(db: Session, user: User) -> int:
     if tab_id is None:
         raise ValueError("Applications tab not found")
 
-    apps = list(
-        db.scalars(
-            select(Application)
-            .where(Application.user_id == user.id)
-            .order_by(Application.email_date.asc(), Application.id.asc())
-        ).all()
+    q = (
+        select(Application)
+        .where(Application.user_id == user.id)
+        .order_by(Application.email_date.asc(), Application.id.asc())
     )
-    if not apps:
+    CHUNK = 3
+    wrote = 0
+    offset = 0
+    while True:
+        apps_chunk = list(db.scalars(q.offset(offset).limit(CHUNK)).all())
+        if not apps_chunk:
+            break
+
+        values_chunk = [
+            [_date_cell(a.email_date), a.company, a.role, a.status.value] for a in apps_chunk
+        ]
+        service.spreadsheets().values().append(
+            spreadsheetId=sheet_id,
+            range=f"{TAB}!A11",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": values_chunk},
+        ).execute()
+        gc.collect()
+
+        # Color the last CHUNK rows we just appended, without re-reading the sheet.
+        for i, a in enumerate(apps_chunk):
+            row_1based = 11 + wrote + i
+            _apply_status_cell_color(service, sheet_id, tab_id, row_1based, a.status.value)
+        gc.collect()
+
+        wrote += len(apps_chunk)
+        offset += CHUNK
+        del values_chunk
+        del apps_chunk
+        gc.collect()
+
+    if wrote == 0:
         sort_sheet_by_date(user)
         return 0
-
-    values = [[_date_cell(a.email_date), a.company, a.role, a.status.value] for a in apps]
-    service.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=f"{TAB}!A11",
-        valueInputOption="USER_ENTERED",
-        body={"values": values},
-    ).execute()
-
-    for i, a in enumerate(apps):
-        row_1based = 11 + i
-        _apply_status_cell_color(service, sheet_id, tab_id, row_1based, a.status.value)
 
     # Force stats formula refresh after bulk write to avoid stale/overwritten cells.
     _, stats_formulas = _stats_headers_and_formulas()
@@ -501,6 +525,7 @@ def rebuild_sheet(db: Session, user: User) -> int:
         valueInputOption="USER_ENTERED",
         body={"values": [stats_formulas]},
     ).execute()
+    gc.collect()
 
     sort_sheet_by_date(user)
-    return len(values)
+    return wrote
