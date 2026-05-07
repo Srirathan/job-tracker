@@ -6,6 +6,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.application import ApplicationStatus
 
 
+class SheetRowPairIn(BaseModel):
+    company: str
+    role: str
+
+
+class SheetRowsSnapshotIn(BaseModel):
+    """Remaining B/C pairs on the Applications sheet after a row removal (row 11+)."""
+
+    spreadsheet_id: Optional[str] = None
+    rows: list[SheetRowPairIn] = []
+    #: When true and rows is empty, delete all applications for the sheet owner (no data rows left).
+    confirm_empty: bool = False
+
+
 class SheetWebhookUpdateIn(BaseModel):
     """Body from Google Apps Script on edits in the Applications data block (sheet row ≥ 11)."""
 

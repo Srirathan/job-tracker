@@ -13,7 +13,12 @@ from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models.application import Application, ApplicationStatus
 from app.models.user import User
-from app.schemas.application import ApplicationOut, ApplicationUpsertIn, SheetWebhookUpdateIn
+from app.schemas.application import (
+    ApplicationOut,
+    ApplicationUpsertIn,
+    SheetRowsSnapshotIn,
+    SheetWebhookUpdateIn,
+)
 from app.services.normalize import normalize_label
 from app.services import sheets_sync
 from app.services.sheets_sync import delete_application_row, upsert_application_row
@@ -28,6 +33,18 @@ def _timing_safe_match(expected: str, provided: str) -> bool:
     if not e or not p or len(e) != len(p):
         return False
     return secrets.compare_digest(e, p)
+
+
+def _require_sheet_sync_token(x_sheet_token: str | None) -> None:
+    expected = (settings.sheet_sync_token or "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sheet sync is not configured",
+        )
+    hdr = (x_sheet_token or "").strip()
+    if not _timing_safe_match(expected, hdr):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid sheet sync token")
 
 
 def resolve_sheet_owner(db: Session, spreadsheet_id: str | None) -> User | None:
@@ -94,16 +111,7 @@ def sheet_update_from_apps_script(
     db: Session = Depends(get_db),
     x_sheet_token: Annotated[str | None, Header(alias="X-Sheet-Token")] = None,
 ):
-    expected = (settings.sheet_sync_token or "").strip()
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Sheet sync is not configured",
-        )
-
-    hdr = (x_sheet_token or "").strip()
-    if not _timing_safe_match(expected, hdr):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid sheet sync token")
+    _require_sheet_sync_token(x_sheet_token)
 
     company_s = body.company.strip()
     role_s = body.role.strip()
@@ -202,6 +210,60 @@ def sheet_update_from_apps_script(
         body.row_number,
     )
     return {"ok": True}
+
+
+@router.post("/sheet-reconcile")
+def sheet_reconcile_after_change(
+    body: SheetRowsSnapshotIn,
+    db: Session = Depends(get_db),
+    x_sheet_token: Annotated[str | None, Header(alias="X-Sheet-Token")] = None,
+):
+    """Delete DB applications whose normalized company+role no longer appear on the sheet (e.g. row removed)."""
+    _require_sheet_sync_token(x_sheet_token)
+
+    sid = (body.spreadsheet_id or "").strip() or None
+    owner = resolve_sheet_owner(db, sid)
+    if owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No account owns this spreadsheet. Set Google Sheet ID in app Settings "
+                "(must match the spreadsheet id from the URL)."
+            ),
+        )
+
+    snapshot: set[tuple[str, str]] = set()
+    for r in body.rows:
+        c = r.company.strip()
+        ro = r.role.strip()
+        if not c or not ro:
+            continue
+        snapshot.add((normalize_label(c), normalize_label(ro)))
+
+    if not snapshot:
+        if not body.confirm_empty:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Snapshot has no company+role pairs; send confirm_empty=true only if all data rows were removed.",
+            )
+        apps = list(db.scalars(select(Application).where(Application.user_id == owner.id)).all())
+        removed = len(apps)
+        for app in apps:
+            db.delete(app)
+        db.commit()
+        _log.info("Sheet reconcile: removed %s application(s) (empty sheet data) for user %s", removed, owner.id)
+        return {"ok": True, "removed": removed}
+
+    apps = list(db.scalars(select(Application).where(Application.user_id == owner.id)).all())
+    removed = 0
+    for app in apps:
+        key = (normalize_label(app.company), normalize_label(app.role))
+        if key not in snapshot:
+            db.delete(app)
+            removed += 1
+    db.commit()
+    _log.info("Sheet reconcile: removed %s application(s) for user %s", removed, owner.id)
+    return {"ok": True, "removed": removed}
 
 
 @router.post("", response_model=ApplicationOut, status_code=status.HTTP_201_CREATED)
