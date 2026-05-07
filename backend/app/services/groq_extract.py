@@ -88,9 +88,10 @@ def extract_job_fields(subject: str, body: str) -> dict[str, Any]:
         return _unknown_zero(groq_failed=False)
 
     prompt = f"{_PROMPT_PREFIX}{subject}{_PROMPT_SUBJECT_BODY_SEP}{body}"
-    client = Groq(api_key=settings.groq_api_key)
+    client: Groq | None = None
     text = ""
     try:
+        client = Groq(api_key=settings.groq_api_key)
         completion = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -98,10 +99,15 @@ def extract_job_fields(subject: str, body: str) -> dict[str, Any]:
         )
         msg = completion.choices[0].message
         text = (msg.content or "").strip()
+        del completion, msg
     except Exception:
         _log.exception("Groq API request failed (model=%s)", GROQ_MODEL)
         _sleep_between_calls()
         return _unknown_zero(groq_failed=True)
+    finally:
+        del prompt
+        if client is not None:
+            del client
 
     _sleep_between_calls()
 
@@ -110,6 +116,7 @@ def extract_job_fields(subject: str, body: str) -> dict[str, Any]:
         return _unknown_zero(groq_failed=True)
 
     obj = _parse_json_object(text)
+    del text
     if not obj:
         _log.warning("Groq returned non-JSON output")
         return _unknown_zero(groq_failed=True)
@@ -128,6 +135,8 @@ def extract_job_fields(subject: str, body: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         confidence = 0
     confidence = max(0, min(100, confidence))
+
+    del obj
 
     return {
         "company": company,

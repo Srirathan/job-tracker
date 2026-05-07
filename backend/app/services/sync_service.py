@@ -153,12 +153,13 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
     creds = gmail_client.build_user_credentials(user)
     query = gmail_client.build_job_search_query()
 
+    cap = settings.gmail_max_emails_per_sync
     try:
-        message_ids = gmail_client.list_message_ids(creds, query)
+        message_ids = gmail_client.list_message_ids(creds, query, max_ids=cap)
     except GmailDisconnectedError:
         raise
 
-    _log.info("Scanned %s Gmail messages", len(message_ids))
+    _log.info("Fetched %s Gmail message id(s) for this run (cap %s)", len(message_ids), cap)
 
     for msg_id in message_ids:
         scanned += 1
@@ -179,7 +180,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         except GmailDisconnectedError:
             raise
 
-        body = (body or "")[:2000]
+        body = body or ""
 
         db.add(
             SeenMessageId(
@@ -191,6 +192,8 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         db.commit()
 
         parsed = extract_job_fields(subject, body)
+        del body
+
         if parsed["confidence"] < 60:
             skipped += 1
             if parsed.get("_groq_failed"):

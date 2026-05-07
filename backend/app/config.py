@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     google_sheet_id: str = ""
 
     gmail_sync_newer_than_days: int = 31
+    gmail_max_emails_per_sync: int = 5
 
     groq_api_key: str = ""
     groq_delay_seconds: int = 2
@@ -60,6 +61,18 @@ class Settings(BaseSettings):
         if v is None or v == "":
             return 31
         return v
+
+    @field_validator("gmail_max_emails_per_sync", mode="before")
+    @classmethod
+    def gmail_max_emails_coerce(cls, v: object) -> object:
+        if v is None or v == "":
+            return 5
+        return v
+
+    @field_validator("gmail_max_emails_per_sync", mode="after")
+    @classmethod
+    def gmail_max_emails_clamp(cls, v: int) -> int:
+        return max(1, min(v, 50))
 
     @field_validator("frontend_url", mode="before")
     @classmethod

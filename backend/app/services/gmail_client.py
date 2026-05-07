@@ -18,6 +18,8 @@ from app.models.user import User
 
 _log = logging.getLogger(__name__)
 
+MAX_PLAIN_BODY_CHARS = 1000
+
 SCOPES: list[str] = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -125,7 +127,7 @@ def _header(headers: list[dict[str, str]], name: str) -> str | None:
     return None
 
 
-def list_message_ids(creds: Credentials, query: str) -> list[str]:
+def list_message_ids(creds: Credentials, query: str, *, max_ids: int | None = None) -> list[str]:
     creds = _ensure_fresh_credentials(creds)
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     ids: list[str] = []
@@ -142,6 +144,8 @@ def list_message_ids(creds: Credentials, query: str) -> list[str]:
                 mid = m.get("id")
                 if mid:
                     ids.append(mid)
+                    if max_ids is not None and len(ids) >= max_ids:
+                        return ids
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
@@ -195,5 +199,8 @@ def get_message_plain_text_and_meta(creds: Credentials, message_id: str) -> tupl
         _collect_html_parts(payload, html_parts)
         if html_parts:
             plain = _html_to_plain("\n".join(html_parts))
+
+    if len(plain) > MAX_PLAIN_BODY_CHARS:
+        plain = plain[:MAX_PLAIN_BODY_CHARS]
 
     return subject, plain, received_at
