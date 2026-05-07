@@ -90,6 +90,16 @@ def _read_data_rows(service, spreadsheet_id: str) -> list[list[str]]:
     return res.get("values") or []
 
 
+def _tab_sheet_id(service, spreadsheet_id: str, title: str) -> int | None:
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets(properties(sheetId,title))").execute()
+    for sheet in meta.get("sheets", []):
+        props = sheet.get("properties") or {}
+        if props.get("title") == title:
+            sid = props.get("sheetId")
+            return int(sid) if sid is not None else None
+    return None
+
+
 def _date_cell(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -121,9 +131,9 @@ def upsert_application_row(user: User, application: Application) -> None:
         if match_row is not None:
             service.spreadsheets().values().update(
                 spreadsheetId=sheet_id,
-                range=f"{TAB}!D{match_row}",
+                range=f"{TAB}!A{match_row}:D{match_row}",
                 valueInputOption="USER_ENTERED",
-                body={"values": [[status_s]]},
+                body={"values": [[date_s, application.company, application.role, status_s]]},
             ).execute()
         else:
             new_row = [date_s, application.company, application.role, status_s]
@@ -139,6 +149,54 @@ def upsert_application_row(user: User, application: Application) -> None:
         _log.warning("Sheets API failed for user %s: %s", user.id, exc)
     except Exception:
         _log.warning("Sheets sync unexpected error for user %s", user.id, exc_info=True)
+
+
+def delete_application_row(user: User, company: str, role: str) -> None:
+    """Remove the data row whose company+role (normalized) match; no-op if sheet unset or row missing."""
+    sheet_id = effective_sheet_id(user)
+    if not sheet_id or not user.google_refresh_token:
+        return
+    try:
+        creds = build_user_credentials(user)
+        service = _sheets_service(creds)
+        ensure_stats_and_headers(service, sheet_id)
+        tab_id = _tab_sheet_id(service, sheet_id, TAB)
+        if tab_id is None:
+            return
+        rows = _read_data_rows(service, sheet_id)
+        want_c = normalize_label(company)
+        want_r = normalize_label(role)
+        for i, row in enumerate(rows):
+            if len(row) < 3:
+                continue
+            b = row[1] if len(row) > 1 else ""
+            c = row[2] if len(row) > 2 else ""
+            if normalize_label(b) == want_c and normalize_label(c) == want_r:
+                row_1based = 11 + i
+                start_idx = row_1based - 1
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=sheet_id,
+                    body={
+                        "requests": [
+                            {
+                                "deleteDimension": {
+                                    "range": {
+                                        "sheetId": tab_id,
+                                        "dimension": "ROWS",
+                                        "startIndex": start_idx,
+                                        "endIndex": start_idx + 1,
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                ).execute()
+                _log.info("Sheets: deleted row for %s - %s", company, role)
+                return
+    except HttpError as exc:
+        _log.warning("Sheets delete failed for user %s: %s", user.id, exc)
+    except Exception:
+        _log.warning("Sheets delete unexpected error for user %s", user.id, exc_info=True)
 
 
 def rebuild_sheet(db: Session, user: User) -> int:
