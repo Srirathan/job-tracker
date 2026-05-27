@@ -19,7 +19,7 @@ from app.models.user import User
 
 _log = logging.getLogger(__name__)
 
-MAX_PLAIN_BODY_CHARS = 300
+MAX_PLAIN_BODY_CHARS = 1000
 
 SCOPES: list[str] = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -93,7 +93,13 @@ def build_job_search_query() -> str:
     days = max(1, min(days, 120))
     parts = [f'"{phrase}"' for phrase in JOB_KEYWORDS]
     _log.debug("Gmail search newer_than:%sd", days)
-    return f"newer_than:{days}d ({' OR '.join(parts)})"
+    exclusions = (
+        " -from:noreply@linkedin.com"
+        " -from:jobs-noreply@linkedin.com"
+        ' -subject:"LinkedIn Job Alert"'
+        ' -subject:"Jobs you may be interested in"'
+    )
+    return f"newer_than:{days}d ({' OR '.join(parts)}){exclusions}"
 
 
 def _decode_body_data(data: str) -> str:

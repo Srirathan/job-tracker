@@ -1,6 +1,11 @@
 from pydantic import BaseModel
 
 
+class SyncJobStarted(BaseModel):
+    job_id: str
+    status: str
+
+
 class SyncSummaryOut(BaseModel):
     scanned: int
     new: int

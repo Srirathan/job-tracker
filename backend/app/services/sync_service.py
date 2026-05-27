@@ -5,10 +5,10 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 from app.models.application import Application, ApplicationStatus
@@ -23,7 +23,7 @@ from app.services.sheets_sync import sort_sheet_by_date, upsert_application_row
 _log = logging.getLogger(__name__)
 
 _SYNC_BATCH_SIZE = 2
-_SYNC_BATCH_PAUSE_SECONDS = 8
+_SYNC_BATCH_PAUSE_SECONDS = 3
 
 _ALLOWED_EXTRACT_STATUSES = {"Applied", "Rejected", "Interview", "OA", "Offer"}
 
@@ -177,15 +177,6 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         nonlocal new, updated, skipped, sk_groq, sk_conf, sk_co, sk_st, sk_dup
 
         body = body_in
-        db.add(
-            SeenMessageId(
-                user_id=user.id,
-                gmail_message_id=msg_id,
-                processed_at=datetime.now(timezone.utc),
-            )
-        )
-        db.commit()
-
         parsed = extract_job_fields(subject, body)
         del body
 
@@ -196,6 +187,14 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
                 _log.info("Skipped %s: Groq extraction failed", msg_id)
             else:
                 sk_conf += 1
+                db.add(
+                    SeenMessageId(
+                        user_id=user.id,
+                        gmail_message_id=msg_id,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.commit()
                 _log.info("Skipped %s: low confidence %s", msg_id, parsed["confidence"])
             return
 
@@ -203,6 +202,14 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         if canon_status == "Unknown" or canon_status not in _ALLOWED_EXTRACT_STATUSES:
             skipped += 1
             sk_st += 1
+            db.add(
+                SeenMessageId(
+                    user_id=user.id,
+                    gmail_message_id=msg_id,
+                    processed_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
             _log.info("Skipped %s: unknown status", msg_id)
             return
 
@@ -212,6 +219,14 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         if not company:
             skipped += 1
             sk_co += 1
+            db.add(
+                SeenMessageId(
+                    user_id=user.id,
+                    gmail_message_id=msg_id,
+                    processed_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
             _log.info("Skipped %s: missing company", msg_id)
             return
 
@@ -233,12 +248,27 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             if unchanged:
                 skipped += 1
                 sk_dup += 1
+                db.add(
+                    SeenMessageId(
+                        user_id=user.id,
+                        gmail_message_id=msg_id,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.commit()
                 return
             existing_gmail.company = company
             existing_gmail.role = role
             existing_gmail.status = status
             existing_gmail.email_date = received_at
             existing_gmail.updated_at = datetime.now(timezone.utc)
+            db.add(
+                SeenMessageId(
+                    user_id=user.id,
+                    gmail_message_id=msg_id,
+                    processed_at=datetime.now(timezone.utc),
+                )
+            )
             db.add(existing_gmail)
             db.commit()
             db.refresh(existing_gmail)
@@ -258,9 +288,24 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             if existing.status == status:
                 skipped += 1
                 sk_dup += 1
+                db.add(
+                    SeenMessageId(
+                        user_id=user.id,
+                        gmail_message_id=msg_id,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.commit()
                 return
             existing.status = status
             existing.updated_at = datetime.now(timezone.utc)
+            db.add(
+                SeenMessageId(
+                    user_id=user.id,
+                    gmail_message_id=msg_id,
+                    processed_at=datetime.now(timezone.utc),
+                )
+            )
             db.add(existing)
             db.commit()
             db.refresh(existing)
@@ -277,6 +322,13 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
             company=company,
             role=role,
             status=status,
+        )
+        db.add(
+            SeenMessageId(
+                user_id=user.id,
+                gmail_message_id=msg_id,
+                processed_at=datetime.now(timezone.utc),
+            )
         )
         db.add(app)
         db.commit()
@@ -350,3 +402,69 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         skipped_unknown_status=sk_st,
         skipped_duplicate_same_status=sk_dup,
     )
+
+
+_jobs: dict[str, dict] = {}
+
+
+def cleanup_old_jobs() -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    to_remove: list[str] = []
+    for job_id, job in _jobs.items():
+        started_raw = job.get("started_at")
+        if not started_raw:
+            continue
+        try:
+            started = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if started < cutoff:
+            to_remove.append(job_id)
+    for job_id in to_remove:
+        del _jobs[job_id]
+
+
+def get_job_state(job_id: str) -> dict | None:
+    return _jobs.get(job_id)
+
+
+def run_gmail_sync_background(job_id: str, db_url: str, user_id: int) -> None:
+    cleanup_old_jobs()
+    engine = None
+    db: Session | None = None
+    started_at = _jobs.get(job_id, {}).get("started_at")
+    try:
+        connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+        engine_kwargs: dict = {"connect_args": connect_args}
+        if not db_url.startswith("sqlite"):
+            engine_kwargs["pool_pre_ping"] = True
+        engine = create_engine(db_url, **engine_kwargs)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        db = SessionLocal()
+        user = db.get(User, user_id)
+        if user is None:
+            raise ValueError("User not found")
+        summary = run_gmail_sync(db, user)
+        _jobs[job_id] = {
+            "status": "done",
+            "summary": summary,
+            "error": None,
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        _log.exception("Background sync failed for job %s user %s", job_id, user_id)
+        _jobs[job_id] = {
+            "status": "error",
+            "summary": None,
+            "error": str(e),
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+    finally:
+        if db is not None:
+            db.close()
+        if engine is not None:
+            engine.dispose()
