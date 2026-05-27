@@ -17,7 +17,7 @@ from app.models.user import User
 from app.services import gmail_client
 from app.services.groq_extract import extract_job_fields
 from app.services.gmail_client import GmailDisconnectedError
-from app.services.normalize import is_same_recruitment_cycle, normalize_label
+from app.services.normalize import is_likely_same_role, is_same_recruitment_cycle, normalize_label
 from app.services.sheets_sync import sort_sheet_by_date, upsert_application_row
 
 _log = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ def _find_duplicate_application(
     ref = reference_time
     in_cycle: list[Application] = []
     for app in db.scalars(select(Application).where(Application.user_id == user_id)).all():
-        if normalize_label(app.company) == norm_company and normalize_label(app.role) == norm_role:
+        if normalize_label(app.company) == norm_company and is_likely_same_role(app.role, norm_role):
             if is_same_recruitment_cycle(app.email_date, reference_time=ref):
                 in_cycle.append(app)
     if not in_cycle:
@@ -180,7 +180,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         parsed = extract_job_fields(subject, body)
         del body
 
-        if parsed["confidence"] < 60:
+        if parsed["confidence"] < 70:
             skipped += 1
             if parsed.get("_groq_failed"):
                 sk_groq += 1
@@ -217,18 +217,8 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         if not company:
             company = (_company_from_subject(subject) or "").strip()
         if not company:
-            skipped += 1
-            sk_co += 1
-            db.add(
-                SeenMessageId(
-                    user_id=user.id,
-                    gmail_message_id=msg_id,
-                    processed_at=datetime.now(timezone.utc),
-                )
-            )
-            db.commit()
-            _log.info("Skipped %s: missing company", msg_id)
-            return
+            company = "Unknown Company"
+            _log.info("Using placeholder company for %s", msg_id)
 
         role = (parsed["role"] or "").strip() or subject.strip() or "Unknown role"
         status = _STATUS_MAP[canon_status]
