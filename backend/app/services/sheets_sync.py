@@ -20,16 +20,23 @@ from app.services.normalize import normalize_label
 _log = logging.getLogger(__name__)
 
 TAB = "Applications"
-RANGE_HEADERS = f"{TAB}!A10:D10"
-RANGE_HEADER_BUFFER = f"{TAB}!A9:D9"
-RANGE_DATA = f"{TAB}!A11:D10000"
-# Rebuild should wipe everything below the stats rows (keeps A2:F3).
-RANGE_REBUILD_CLEAR = f"{TAB}!A4:F10000"
-# Memory: only scan first 200 data rows when matching company+role (upsert / delete).
-RANGE_MATCH_SLICE = f"{TAB}!A11:D300"
-RANGE_ROW_COUNT_SLICE = f"{TAB}!A11:A500"
+HEADER_ROW = 5
+DATA_START_ROW = 6
+DATA_END_ROW = 10000
+MATCH_SCAN_ROWS = 200
+ROW_COUNT_SCAN_ROWS = 500
+SORT_SCAN_ROWS = 1000
 
-# Stats block: row 2 labels, row 3 formulas (A–F); data from row 11; headers row 10.
+RANGE_HEADERS = f"{TAB}!A{HEADER_ROW}:D{HEADER_ROW}"
+RANGE_HEADER_BUFFER = f"{TAB}!A{HEADER_ROW - 1}:D{HEADER_ROW - 1}"
+RANGE_DATA = f"{TAB}!A{DATA_START_ROW}:D{DATA_END_ROW}"
+# Rebuild should wipe everything below the stats rows (keeps A2:F3).
+RANGE_REBUILD_CLEAR = f"{TAB}!A4:F{DATA_END_ROW}"
+# Memory: only scan first 200 data rows when matching company+role (upsert / delete).
+RANGE_MATCH_SLICE = f"{TAB}!A{DATA_START_ROW}:D{DATA_START_ROW + MATCH_SCAN_ROWS - 1}"
+RANGE_ROW_COUNT_SLICE = f"{TAB}!A{DATA_START_ROW}:A{DATA_START_ROW + ROW_COUNT_SCAN_ROWS - 1}"
+
+# Stats block: row 2 labels, row 3 formulas (A–F); data from row 6; headers row 5.
 STATS_VALUE_RANGE = f"{TAB}!A2:F3"
 
 
@@ -123,16 +130,15 @@ def _stats_format_requests(tab_id: int) -> list[dict]:
 
 
 def _header_format_requests(tab_id: int) -> list[dict]:
-    """Force the row-10 header styling (prevents D10 being colored like a status cell)."""
+    """Force header styling (prevents header status cell inheriting row colors)."""
     grey = _hex_to_color("#f0f0f0")
     return [
         {
             "repeatCell": {
                 "range": {
                     "sheetId": tab_id,
-                    # Row 10 in Sheets is 0-based index 9
-                    "startRowIndex": 9,
-                    "endRowIndex": 10,
+                    "startRowIndex": HEADER_ROW - 1,
+                    "endRowIndex": HEADER_ROW,
                     "startColumnIndex": 0,
                     "endColumnIndex": 4,
                 },
@@ -156,9 +162,8 @@ def _data_block_format_requests(tab_id: int) -> list[dict]:
             "repeatCell": {
                 "range": {
                     "sheetId": tab_id,
-                    # Data starts at row 11 (0-based index 10)
-                    "startRowIndex": 10,
-                    "endRowIndex": 10000,
+                    "startRowIndex": DATA_START_ROW - 1,
+                    "endRowIndex": DATA_END_ROW,
                     "startColumnIndex": 0,
                     "endColumnIndex": 4,
                 },
@@ -175,8 +180,8 @@ def _data_block_format_requests(tab_id: int) -> list[dict]:
                 "range": {
                     "sheetId": tab_id,
                     # Date column only (A)
-                    "startRowIndex": 10,
-                    "endRowIndex": 10000,
+                    "startRowIndex": DATA_START_ROW - 1,
+                    "endRowIndex": DATA_END_ROW,
                     "startColumnIndex": 0,
                     "endColumnIndex": 1,
                 },
@@ -202,23 +207,25 @@ def _stats_headers_and_formulas() -> tuple[list[str], list[str]]:
     ]
     # Lock ranges with INDIRECT so references never drift.
     # Also exclude header-like rows by requiring col A not blank and not equal "Date".
+    start = DATA_START_ROW
+    stop = DATA_START_ROW + SORT_SCAN_ROWS - 1
     formulas = [
-        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Applied*")'
-        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Interview*")'
-        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*OA*")'
-        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Rejected*")'
-        '+COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Offer*")',
-        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Interview*")',
-        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*OA*")',
-        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Rejected*")',
-        '=COUNTIFS(INDIRECT("A11:A1000"),"<>",INDIRECT("A11:A1000"),"<>Date",INDIRECT("D11:D1000"),"*Offer*")',
+        f'=COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*Applied*")'
+        f'+COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*Interview*")'
+        f'+COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*OA*")'
+        f'+COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*Rejected*")'
+        f'+COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*Offer*")',
+        f'=COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*Interview*")',
+        f'=COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*OA*")',
+        f'=COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*Rejected*")',
+        f'=COUNTIFS(INDIRECT("A{start}:A{stop}"),"<>",INDIRECT("A{start}:A{stop}"),"<>Date",INDIRECT("D{start}:D{stop}"),"*Offer*")',
         '=IF(A3=0,"0%",TEXT((B3+C3+D3+E3)/A3,"0%"))',
     ]
     return headers, formulas
 
 
 def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
-    """Ensure stats headers/formulas and row-10 headers are present and valid."""
+    """Ensure stats headers/formulas and table header row are present and valid."""
     tab_id = _tab_sheet_id(service, spreadsheet_id, TAB)
     if tab_id is None:
         return
@@ -241,7 +248,7 @@ def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
         body={"values": [stats_formulas]},
     ).execute()
 
-    # Clear row 9 buffer and enforce exactly one header row at row 10.
+    # Clear the buffer row above headers and enforce exactly one header row.
     service.spreadsheets().values().clear(
         spreadsheetId=spreadsheet_id,
         range=RANGE_HEADER_BUFFER,
@@ -320,7 +327,7 @@ def _data_row_count(service, spreadsheet_id: str) -> int:
 
 
 def sort_sheet_by_date(user: User) -> None:
-    """Sort data rows 11+ by column A (date) descending."""
+    """Sort data rows by column A (date) descending."""
     sheet_id = effective_sheet_id(user)
     if not sheet_id or not user.google_refresh_token:
         return
@@ -331,7 +338,7 @@ def sort_sheet_by_date(user: User) -> None:
         if tab_id is None:
             return
         # Server-side sort only; avoid reading any sheet values into memory.
-        # Sort a fixed bounded range (up to 1000 rows) starting at row 11.
+        # Sort a fixed bounded range starting at the configured data row.
         service.spreadsheets().batchUpdate(
             spreadsheetId=sheet_id,
             body={
@@ -340,8 +347,8 @@ def sort_sheet_by_date(user: User) -> None:
                         "sortRange": {
                             "range": {
                                 "sheetId": tab_id,
-                                "startRowIndex": 10,
-                                "endRowIndex": 1010,
+                                "startRowIndex": DATA_START_ROW - 1,
+                                "endRowIndex": DATA_START_ROW - 1 + SORT_SCAN_ROWS,
                                 "startColumnIndex": 0,
                                 "endColumnIndex": 4,
                             },
@@ -388,6 +395,53 @@ def _apply_status_cell_color(
     ).execute()
 
 
+def _apply_data_row_base_format(
+    service,
+    spreadsheet_id: str,
+    tab_id: int,
+    row_1based: int,
+) -> None:
+    """Force base row formatting: white A:C + date format on A."""
+    white = _hex_to_color("#ffffff")
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": tab_id,
+                            "startRowIndex": row_1based - 1,
+                            "endRowIndex": row_1based,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 3,
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": white}},
+                        "fields": "userEnteredFormat.backgroundColor",
+                    }
+                },
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": tab_id,
+                            "startRowIndex": row_1based - 1,
+                            "endRowIndex": row_1based,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"},
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+            ]
+        },
+    ).execute()
+
+
 def _find_match_row(
     rows: list[list[str]], want_c: str, want_r: str
 ) -> int | None:
@@ -397,7 +451,7 @@ def _find_match_row(
         b = row[1] if len(row) > 1 else ""
         c = row[2] if len(row) > 2 else ""
         if normalize_label(b) == want_c and normalize_label(c) == want_r:
-            return 11 + i
+            return DATA_START_ROW + i
     return None
 
 
@@ -430,13 +484,15 @@ def upsert_application_row(user: User, application: Application) -> None:
                 body={"values": [[date_s, application.company, application.role, status_s]]},
             ).execute()
             gc.collect()
+            _apply_data_row_base_format(service, sheet_id, tab_id, match_row)
+            gc.collect()
             _apply_status_cell_color(service, sheet_id, tab_id, match_row, status_s)
             gc.collect()
         else:
             new_row = [date_s, application.company, application.role, status_s]
             service.spreadsheets().values().append(
                 spreadsheetId=sheet_id,
-                range=f"{TAB}!A11",
+                range=f"{TAB}!A{DATA_START_ROW}",
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [new_row]},
@@ -446,6 +502,8 @@ def upsert_application_row(user: User, application: Application) -> None:
             new_match = _find_match_row(rows_after, want_c, want_r)
             del rows_after
             if new_match is not None:
+                _apply_data_row_base_format(service, sheet_id, tab_id, new_match)
+                gc.collect()
                 _apply_status_cell_color(service, sheet_id, tab_id, new_match, status_s)
                 gc.collect()
 
@@ -477,7 +535,7 @@ def delete_application_row(user: User, company: str, role: str) -> None:
             b = row[1] if len(row) > 1 else ""
             c = row[2] if len(row) > 2 else ""
             if normalize_label(b) == want_c and normalize_label(c) == want_r:
-                row_1based = 11 + i
+                row_1based = DATA_START_ROW + i
                 start_idx = row_1based - 1
                 service.spreadsheets().batchUpdate(
                     spreadsheetId=sheet_id,
@@ -517,7 +575,7 @@ def rebuild_sheet(db: Session, user: User) -> int:
     service = _sheets_service(creds)
 
     try:
-        # Wipe everything below the stats block so stray headers/rows above A11
+        # Wipe everything below the stats block so stray headers/rows above the data start
         # don't cause stats to "miss" items.
         service.spreadsheets().values().clear(spreadsheetId=sheet_id, range=RANGE_REBUILD_CLEAR).execute()
     except HttpError as exc:
@@ -547,7 +605,7 @@ def rebuild_sheet(db: Session, user: User) -> int:
         ]
         service.spreadsheets().values().append(
             spreadsheetId=sheet_id,
-            range=f"{TAB}!A11",
+            range=f"{TAB}!A{DATA_START_ROW}",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": values_chunk},
@@ -556,7 +614,8 @@ def rebuild_sheet(db: Session, user: User) -> int:
 
         # Color the last CHUNK rows we just appended, without re-reading the sheet.
         for i, a in enumerate(apps_chunk):
-            row_1based = 11 + wrote + i
+            row_1based = DATA_START_ROW + wrote + i
+            _apply_data_row_base_format(service, sheet_id, tab_id, row_1based)
             _apply_status_cell_color(service, sheet_id, tab_id, row_1based, a.status.value)
         gc.collect()
 

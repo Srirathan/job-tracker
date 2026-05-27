@@ -80,7 +80,7 @@ export function SettingsPage() {
   }
 
   const onRebuild = async () => {
-    if (!window.confirm('Clear all data rows in the Sheet (below row 10) and rewrite from the database?')) return
+    if (!window.confirm('Clear all data rows in the Sheet (below row 5) and rewrite from the database?')) return
     setBusy(true)
     setError(null)
     try {

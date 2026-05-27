@@ -12,7 +12,7 @@ class SheetRowPairIn(BaseModel):
 
 
 class SheetRowsSnapshotIn(BaseModel):
-    """Remaining B/C pairs on the Applications sheet after a row removal (row 11+)."""
+    """Remaining B/C pairs on the Applications sheet after a row removal (row 6+)."""
 
     spreadsheet_id: Optional[str] = None
     rows: list[SheetRowPairIn] = []
@@ -21,7 +21,7 @@ class SheetRowsSnapshotIn(BaseModel):
 
 
 class SheetWebhookUpdateIn(BaseModel):
-    """Body from Google Apps Script on edits in the Applications data block (sheet row ≥ 11)."""
+    """Body from Google Apps Script on edits in the Applications data block (sheet row >= 6)."""
 
     row_number: int = Field(ge=1)
     company: str

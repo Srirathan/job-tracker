@@ -12,6 +12,9 @@
  * Simple onEdit still works without that; row DELETE needs the installable trigger.
  */
 
+var HEADER_ROW = 5;
+var DATA_START_ROW = 6;
+
 function sheetDateToIso(rawValue, displayValue) {
   if (rawValue instanceof Date && !isNaN(rawValue.getTime())) {
     return Utilities.formatDate(rawValue, Session.getScriptTimeZone(), 'yyyy-MM-dd');
@@ -40,15 +43,16 @@ function getReconcileUrl_(props) {
 }
 
 /**
- * Collect {company, role} for each data row (11..lastRow) where both B and C are non-empty.
+ * Collect {company, role} for each data row (DATA_START_ROW..lastRow) where both B and C are non-empty.
  */
 function collectSheetPairs_(sh) {
   var lastRow = sh.getLastRow();
-  if (lastRow < 11) {
+  if (lastRow < DATA_START_ROW) {
     return { rows: [], confirm_empty: true };
   }
   var pairs = [];
-  var values = sh.getRange(11, 2, lastRow, 3).getDisplayValues();
+  var nRows = lastRow - DATA_START_ROW + 1;
+  var values = sh.getRange(DATA_START_ROW, 2, nRows, 3).getDisplayValues();
   for (var i = 0; i < values.length; i++) {
     var company = String(values[i][0] || '').trim();
     var role = String(values[i][1] || '').trim();
@@ -124,7 +128,7 @@ function pushApplicationsRowToApi(row, sh) {
   sh = sh || getApplicationsSheet_();
   if (!sh) return 'no Applications sheet';
 
-  if (row < 11) return 'row < 11';
+  if (row < DATA_START_ROW) return 'row < DATA_START_ROW';
 
   var company = String(sh.getRange(row, 2).getDisplayValue() || '').trim();
   var role = String(sh.getRange(row, 3).getDisplayValue() || '').trim();
@@ -181,8 +185,21 @@ function onEdit(e) {
   var row = e.range.getRow();
   var col = e.range.getColumn();
 
-  if (row < 11) return;
+  if (row < DATA_START_ROW) return;
   if (col < 1 || col > 4) return;
+
+  var company = String(sh.getRange(row, 2).getDisplayValue() || '').trim();
+  var role = String(sh.getRange(row, 3).getDisplayValue() || '').trim();
+  var status = String(sh.getRange(row, 4).getDisplayValue() || '').trim();
+
+  /**
+   * After an edit in A–D: if company, role, and status are all empty, treat like a removed row
+   * (user cleared B–D instead of deleting the row).
+   */
+  if (!company && !role && !status) {
+    pushSheetReconcileToApi_();
+    return;
+  }
 
   pushApplicationsRowToApi(row, sh);
 }
