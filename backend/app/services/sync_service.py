@@ -35,6 +35,14 @@ _STATUS_MAP: dict[str, ApplicationStatus] = {
     "Offer": ApplicationStatus.OFFER,
 }
 
+_STATUS_PRECEDENCE: dict[ApplicationStatus, int] = {
+    ApplicationStatus.APPLIED: 1,
+    ApplicationStatus.OA: 2,
+    ApplicationStatus.INTERVIEW: 3,
+    ApplicationStatus.OFFER: 4,
+    ApplicationStatus.REJECTED: 5,
+}
+
 
 def _normalize_ai_status(raw: str) -> str:
     """Map common model variants to the five allowed status labels."""
@@ -173,11 +181,17 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         _SYNC_BATCH_PAUSE_SECONDS,
     )
 
-    def process_fetched_message(msg_id: str, subject: str, body_in: str, received_at: datetime) -> None:
+    def process_fetched_message(
+        msg_id: str,
+        subject: str,
+        body_in: str,
+        received_at: datetime,
+        sender_domain: str | None,
+    ) -> None:
         nonlocal new, updated, skipped, sk_groq, sk_conf, sk_co, sk_st, sk_dup
 
         body = body_in
-        parsed = extract_job_fields(subject, body)
+        parsed = extract_job_fields(subject, body, sender_domain=sender_domain)
         del body
 
         if parsed["confidence"] < 70:
@@ -216,6 +230,9 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         company = (parsed["company"] or "").strip()
         if not company:
             company = (_company_from_subject(subject) or "").strip()
+        if not company and sender_domain:
+            company = sender_domain
+            _log.info("Using sender domain as company fallback for %s: %s", msg_id, company)
         if not company:
             company = "Unknown Company"
             _log.info("Using placeholder company for %s", msg_id)
@@ -246,6 +263,26 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
                     )
                 )
                 db.commit()
+                return
+            current_precedence = _STATUS_PRECEDENCE.get(existing_gmail.status, 0)
+            new_precedence = _STATUS_PRECEDENCE.get(status, 0)
+            if new_precedence < current_precedence:
+                skipped += 1
+                sk_dup += 1
+                db.add(
+                    SeenMessageId(
+                        user_id=user.id,
+                        gmail_message_id=msg_id,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.commit()
+                _log.info(
+                    "Skipped status downgrade %s: %s → %s",
+                    msg_id,
+                    existing_gmail.status.value,
+                    status.value,
+                )
                 return
             existing_gmail.company = company
             existing_gmail.role = role
@@ -286,6 +323,26 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
                     )
                 )
                 db.commit()
+                return
+            current_precedence = _STATUS_PRECEDENCE.get(existing.status, 0)
+            new_precedence = _STATUS_PRECEDENCE.get(status, 0)
+            if new_precedence < current_precedence:
+                skipped += 1
+                sk_dup += 1
+                db.add(
+                    SeenMessageId(
+                        user_id=user.id,
+                        gmail_message_id=msg_id,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.commit()
+                _log.info(
+                    "Skipped status downgrade %s: %s → %s",
+                    msg_id,
+                    existing.status.value,
+                    status.value,
+                )
                 return
             existing.status = status
             existing.updated_at = datetime.now(timezone.utc)
@@ -350,9 +407,10 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
         subject_in = gm.subject
         body_in = gm.body
         recv = gm.date
+        sender_domain_in = gm.sender_domain
         del gm
 
-        process_fetched_message(msg_id, subject_in, body_in, recv)
+        process_fetched_message(msg_id, subject_in, body_in, recv, sender_domain_in)
 
         del subject_in, body_in, recv
 
@@ -395,6 +453,7 @@ def run_gmail_sync(db: Session, user: User) -> SyncSummary:
 
 
 _jobs: dict[str, dict] = {}
+_active_sync_users: set[int] = set()
 
 
 def cleanup_old_jobs() -> None:
@@ -422,9 +481,19 @@ def get_job_state(job_id: str) -> dict | None:
 
 def run_gmail_sync_background(job_id: str, db_url: str, user_id: int) -> None:
     cleanup_old_jobs()
+    started_at = _jobs.get(job_id, {}).get("started_at")
+    if user_id in _active_sync_users:
+        _jobs[job_id] = {
+            "status": "error",
+            "summary": None,
+            "error": "A sync is already running for this account. Please wait.",
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return
+    _active_sync_users.add(user_id)
     engine = None
     db: Session | None = None
-    started_at = _jobs.get(job_id, {}).get("started_at")
     try:
         connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
         engine_kwargs: dict = {"connect_args": connect_args}
@@ -454,6 +523,7 @@ def run_gmail_sync_background(job_id: str, db_url: str, user_id: int) -> None:
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
     finally:
+        _active_sync_users.discard(user_id)
         if db is not None:
             db.close()
         if engine is not None:

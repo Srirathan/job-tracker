@@ -55,6 +55,7 @@ Rules for confidence:
 - Return 0 if company is null or status is Unknown.
 
 Email subject: {subject}
+{sender_hint}
 Email body: {body}"""
 
 _COMPANY_BAD_SUBSTRINGS = (
@@ -181,12 +182,25 @@ def _sleep_between_calls() -> None:
     time.sleep(max(0, settings.groq_delay_seconds))
 
 
-def extract_job_fields(subject: str, body: str) -> dict[str, Any]:
+def extract_job_fields(
+    subject: str,
+    body: str,
+    sender_domain: str | None = None,
+) -> dict[str, Any]:
     if not (settings.groq_api_key or "").strip():
         _log.warning("GROQ_API_KEY missing; returning Unknown with confidence 0")
         return _unknown_zero(groq_failed=False)
 
-    prompt = _PROMPT_TEMPLATE.format(subject=subject, body=body)
+    sender_hint = (
+        f"Sender domain hint (likely the hiring company): {sender_domain}"
+        if sender_domain
+        else ""
+    )
+    prompt = _PROMPT_TEMPLATE.format(
+        subject=subject,
+        sender_hint=sender_hint,
+        body=body,
+    )
     client: Groq | None = None
     text = ""
     try:

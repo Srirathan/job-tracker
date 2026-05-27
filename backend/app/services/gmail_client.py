@@ -21,6 +21,67 @@ _log = logging.getLogger(__name__)
 
 MAX_PLAIN_BODY_CHARS = 1000
 
+KEYWORD_HINTS = [
+    "pleased",
+    "unfortunately",
+    "regret",
+    "not selected",
+    "not moving forward",
+    "assessment",
+    "offer",
+    "interview",
+    "congratulations",
+    "next steps",
+    "coding challenge",
+    "hackerrank",
+    "codility",
+    "codesignal",
+    "take-home",
+    "we would like",
+    "happy to inform",
+    "move forward",
+]
+
+_RECRUITMENT_PLATFORM_DOMAINS = frozenset(
+    {
+        "greenhouse.io",
+        "lever.co",
+        "workday.com",
+        "taleo.net",
+        "icims.com",
+        "myworkdayjobs.com",
+        "jobvite.com",
+        "smartrecruiters.com",
+        "ashbyhq.com",
+        "rippling.com",
+        "linkedin.com",
+        "indeed.com",
+        "riipen.com",
+        "simplyhired.com",
+        "ziprecruiter.com",
+        "careers-page.com",
+        "hire.com",
+        "recruitee.com",
+    }
+)
+
+_STRIP_SUBDOMAINS = frozenset(
+    {
+        "careers",
+        "jobs",
+        "mail",
+        "email",
+        "noreply",
+        "no-reply",
+        "notifications",
+        "recruiting",
+        "hr",
+        "talent",
+        "apply",
+        "hire",
+    }
+)
+
 SCOPES: list[str] = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -55,6 +116,27 @@ class GmailMessageSyncFields:
     body: str
     date: datetime
     sender: str
+    sender_domain: str | None
+
+
+def extract_sender_domain(sender: str) -> str | None:
+    """Derive a hiring-company hint from the sender email domain, or None for ATS/job boards."""
+    addr = (sender or "").strip().lower()
+    if "@" not in addr:
+        return None
+    domain = addr.rsplit("@", 1)[-1]
+    for plat in _RECRUITMENT_PLATFORM_DOMAINS:
+        if domain == plat or domain.endswith("." + plat):
+            return None
+    parts = domain.split(".")
+    while parts and parts[0] in _STRIP_SUBDOMAINS:
+        parts.pop(0)
+    if not parts:
+        return None
+    name = parts[0]
+    if len(name) < 2:
+        return None
+    return name.title()
 
 
 def gmail_oauth_configured() -> bool:
@@ -98,6 +180,12 @@ def build_job_search_query() -> str:
         " -from:jobs-noreply@linkedin.com"
         ' -subject:"LinkedIn Job Alert"'
         ' -subject:"Jobs you may be interested in"'
+        " -from:riipen.com"
+        " -from:simplyhired.com"
+        " -from:ziprecruiter.com"
+        ' -subject:"job alert"'
+        ' -subject:"jobs you may like"'
+        ' -subject:"recommended jobs"'
     )
     return f"newer_than:{days}d ({' OR '.join(parts)}){exclusions}"
 
@@ -237,8 +325,22 @@ def fetch_message_for_sync(creds: Credentials, message_id: str) -> GmailMessageS
 
     del payload
 
-    if len(plain) > MAX_PLAIN_BODY_CHARS:
-        plain = plain[:MAX_PLAIN_BODY_CHARS]
+    if len(plain) <= MAX_PLAIN_BODY_CHARS:
+        pass
+    else:
+        first_chunk = plain[:600]
+        sentences = re.split(r"(?<=[.!?])\s+", plain[600:])
+        bonus: list[str] = []
+        for sentence in sentences:
+            sl = sentence.lower()
+            if any(kw in sl for kw in KEYWORD_HINTS):
+                bonus.append(sentence.strip())
+            if len(bonus) >= 3:
+                break
+        plain = first_chunk
+        if bonus:
+            plain = plain + " ... " + " ".join(bonus)
+        plain = plain[: MAX_PLAIN_BODY_CHARS * 2]
 
     return GmailMessageSyncFields(
         id=resolved_id,
@@ -246,6 +348,7 @@ def fetch_message_for_sync(creds: Credentials, message_id: str) -> GmailMessageS
         body=plain,
         date=received_at,
         sender=sender,
+        sender_domain=extract_sender_domain(sender),
     )
 
 

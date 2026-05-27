@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     gmail_sync_newer_than_days: int = 31
     #: Hard cap on messages processed per Gmail sync run (memory safety on small hosts).
-    gmail_max_emails_per_sync: int = 20
+    gmail_max_emails_per_sync: int = 30
 
     groq_api_key: str = ""
     groq_delay_seconds: int = 2
@@ -70,13 +70,13 @@ class Settings(BaseSettings):
     @classmethod
     def gmail_max_sync_coerce(cls, v: object) -> object:
         if v is None or v == "":
-            return 20
+            return 30
         return v
 
     @field_validator("gmail_max_emails_per_sync", mode="after")
     @classmethod
     def gmail_max_sync_clamp(cls, v: int) -> int:
-        return max(1, min(v, 20))
+        return max(1, min(v, 50))
 
     @field_validator("frontend_url", mode="before")
     @classmethod
