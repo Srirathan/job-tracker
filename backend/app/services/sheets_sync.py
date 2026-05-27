@@ -21,6 +21,7 @@ _log = logging.getLogger(__name__)
 
 TAB = "Applications"
 RANGE_HEADERS = f"{TAB}!A10:D10"
+RANGE_HEADER_BUFFER = f"{TAB}!A9:D9"
 RANGE_DATA = f"{TAB}!A11:D10000"
 # Rebuild should wipe everything below the stats rows (keeps A2:F3).
 RANGE_REBUILD_CLEAR = f"{TAB}!A4:F10000"
@@ -147,6 +148,49 @@ def _header_format_requests(tab_id: int) -> list[dict]:
     ]
 
 
+def _data_block_format_requests(tab_id: int) -> list[dict]:
+    """Keep data rows plain: white background + explicit date format on column A."""
+    white = _hex_to_color("#ffffff")
+    return [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": tab_id,
+                    # Data starts at row 11 (0-based index 10)
+                    "startRowIndex": 10,
+                    "endRowIndex": 10000,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 4,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": white,
+                    }
+                },
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": tab_id,
+                    # Date column only (A)
+                    "startRowIndex": 10,
+                    "endRowIndex": 10000,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"},
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        },
+    ]
+
+
 def _stats_headers_and_formulas() -> tuple[list[str], list[str]]:
     headers = [
         "Total Applied",
@@ -197,6 +241,13 @@ def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
         body={"values": [stats_formulas]},
     ).execute()
 
+    # Clear row 9 buffer and enforce exactly one header row at row 10.
+    service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=RANGE_HEADER_BUFFER,
+    ).execute()
+    gc.collect()
+
     headers_body = {"values": [["Date", "Company", "Role", "Status"]]}
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
@@ -204,9 +255,11 @@ def ensure_stats_and_headers(service, spreadsheet_id: str) -> None:
         valueInputOption="USER_ENTERED",
         body=headers_body,
     ).execute()
+    gc.collect()
 
     # Always enforce header style so "Status" header cannot be colored like a status value.
     reqs: list[dict] = []
+    reqs.extend(_data_block_format_requests(tab_id))
     reqs.extend(_header_format_requests(tab_id))
     if not was_seeded:
         reqs.extend(_stats_format_requests(tab_id))
